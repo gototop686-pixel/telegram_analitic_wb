@@ -21,7 +21,13 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 
 async def on_startup(bot: Bot) -> None:
-    await get_pool()
+    try:
+        await get_pool()
+        print("[startup] Database connected")
+    except Exception as e:
+        print(f"[startup] DB warning: {e} — retrying on first request")
+
+    await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     print(f"[startup] Webhook set: {WEBHOOK_URL}")
 
