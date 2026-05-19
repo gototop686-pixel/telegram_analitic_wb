@@ -1,8 +1,13 @@
 import os
 import json
+import httpx
 import anthropic
 
 _client: anthropic.AsyncAnthropic | None = None
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
 def get_client() -> anthropic.AsyncAnthropic:
@@ -10,6 +15,25 @@ def get_client() -> anthropic.AsyncAnthropic:
     if _client is None:
         _client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     return _client
+
+
+async def _gemini(prompt: str, max_tokens: int = 1000) -> str:
+    """Call Gemini Flash (free tier). Falls back to Claude Haiku if key missing."""
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY not set")
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json=payload,
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:200]}")
+    data = resp.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
 GOTOTOP_CONTEXT = """Ты аналитик компании GoToTop — консалтинговой компании для продавцов на Wildberries.
@@ -62,19 +86,25 @@ CLASSIFY_PROMPT = """{context}
 
 async def classify_and_summarize(text: str) -> dict:
     from bot.db import queries as db_queries
-    client = get_client()
     context = await db_queries.get_setting("gototop_context", GOTOTOP_CONTEXT)
     prompt = CLASSIFY_PROMPT.format(
         taxonomy=", ".join(TAXONOMY),
         text=text[:3000],
     ).replace(GOTOTOP_CONTEXT, context, 1)
-    response = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    await _log_cost("classify", response, "claude-haiku-4-5-20251001")
-    raw = response.content[0].text.strip()
+
+    if GEMINI_API_KEY:
+        raw = await _gemini(prompt, max_tokens=1000)
+    else:
+        # Fallback to Claude Haiku
+        client = get_client()
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        await _log_cost("classify", response, "claude-haiku-4-5-20251001")
+        raw = response.content[0].text.strip()
+
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -94,6 +124,15 @@ async def _log_cost(operation: str, response, model: str) -> None:
         in_rate, out_rate = rates.get(model, (3.00, 15.00))
         cost = (inp * in_rate + out * out_rate) / 1_000_000
         await queries.log_llm_cost(operation, inp, out, model, cost)
+    except Exception:
+        pass
+
+
+async def _log_gemini(operation: str) -> None:
+    """Log Gemini call with $0 cost (free tier)."""
+    try:
+        from bot.db import queries
+        await queries.log_llm_cost(operation, 0, 0, "gemini-2.0-flash", 0.0)
     except Exception:
         pass
 
@@ -143,20 +182,30 @@ async def cluster_events(events: list[dict]) -> list[list[int]]:
         return [[i] for i in range(len(events))]
 
     titles = "\n".join(f"{i}: {e.get('title', e.get('body', ''))[:80]}" for i, e in enumerate(events))
-    client = get_client()
-    response = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=500,
-        messages=[{"role": "user", "content": CLUSTER_PROMPT.format(titles=titles)}],
-    )
-    await _log_cost("cluster", response, "claude-haiku-4-5-20251001")
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    data = json.loads(raw)
-    return data.get("clusters", [[i] for i in range(len(events))])
+    prompt = CLUSTER_PROMPT.format(titles=titles)
+
+    try:
+        if GEMINI_API_KEY:
+            raw = await _gemini(prompt, max_tokens=500)
+        else:
+            client = get_client()
+            response = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            await _log_cost("cluster", response, "claude-haiku-4-5-20251001")
+            raw = response.content[0].text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        data = json.loads(raw)
+        return data.get("clusters", [[i] for i in range(len(events))])
+    except Exception as e:
+        print(f"[cluster] Failed: {e} — treating each event separately")
+        return [[i] for i in range(len(events))]
 
 
 COMPARE_PROMPT = """Ты юридический аналитик WB. Сравни СТАРУЮ и НОВУЮ версии оферты Wildberries.
