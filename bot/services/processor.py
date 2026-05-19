@@ -4,56 +4,56 @@ from bot.db import queries
 from bot.services import llm
 from bot.services.publisher import send_draft_to_moderators
 
-# CORE keywords — must have at least one for any tier
-_CORE = [
+# Fallback defaults (used if DB has no keywords yet)
+_DEFAULT_CORE = [
     "wildberries", "вайлдберриз", "seller.wildberries",
-    "wb ", " wb,", " wb.", "вб ", "вб,",
-    "маркетплейс", "маркетплейсы",
-    "оферта wb", "оферта вб",
-    "озон", "ozon", "kaspi", "каспи",
-    "селлер", "продавец на wb", "продавец на маркетплейс",
+    "маркетплейс", "маркетплейсы", "ozon", "озон",
+    "kaspi", "каспи", "селлер", "еаэс", "таможня", "фас ",
 ]
-
-# CONTEXT keywords — support CORE; for weak sources, 2+ required without CORE
-_CONTEXT = [
-    "комиссия", "тариф", "логистика", "штраф за",
-    "таможня", "таможенн", "еаэс",
-    "фас ", "антимонопол",
-    "оферта", "личный кабинет продавца",
-    "поставщик", "карточка товара", "ранжирование",
-    "импорт товар", "ввоз товар", "торговля арм",
+_DEFAULT_CONTEXT = [
+    "комиссия", "тариф", "логистика", "штраф",
+    "оферта", "ввоз товар", "импорт товар", "поставщик",
+    "карточка товара", "ранжирование", "торговля", "кросс-бордер",
 ]
 
 
-def _keyword_passes(text: str, strict: bool = False) -> bool:
+async def _load_keywords() -> tuple[list[str], list[str]]:
+    core_str = await queries.get_setting("filter_core_keywords", "")
+    context_str = await queries.get_setting("filter_context_keywords", "")
+    core = [k.strip() for k in core_str.split(",") if k.strip()] if core_str else _DEFAULT_CORE
+    context = [k.strip() for k in context_str.split(",") if k.strip()] if context_str else _DEFAULT_CONTEXT
+    return core, context
+
+
+def _keyword_passes(text: str, core: list[str], context: list[str], strict: bool = False) -> bool:
     """
-    strict=True (for government/regulatory sources): requires at least 1 CORE keyword.
-    strict=False (for telegram/media): 1 CORE OR 2+ CONTEXT is enough.
+    strict=True (regulatory/government sources): requires at least 1 CORE keyword.
+    strict=False (telegram/media): 1 CORE OR 2+ CONTEXT keywords.
     """
     low = text.lower()
-    has_core = any(kw in low for kw in _CORE)
-    if has_core:
+    if any(kw in low for kw in core):
         return True
     if strict:
         return False
-    context_count = sum(1 for kw in _CONTEXT if kw in low)
-    return context_count >= 2
+    return sum(1 for kw in context if kw in low) >= 2
 
 
 async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> int:
     max_events = int(await queries.get_setting("max_events_per_run", "10"))
+    min_confidence = float(await queries.get_setting("min_confidence", "0.45"))
+    relevant_labels_str = await queries.get_setting("relevant_labels", "")
+    relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else set()
+
+    # Load keywords from DB once per run
+    core_kw, context_kw = await _load_keywords()
+
+    # Government RSS sources require at least 1 CORE keyword (strict mode)
+    strict_filter = processing_tier == "weekly"
 
     if processing_tier == "all":
         events = await queries.get_unprocessed_events(limit=max_events)
     else:
         events = await queries.get_unprocessed_events_tiered(processing_tier, limit=max_events)
-
-    min_confidence = float(await queries.get_setting("min_confidence", "0.45"))
-    relevant_labels_str = await queries.get_setting("relevant_labels", "")
-    relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else set()
-
-    # Government RSS sources get strict keyword filtering (must have a CORE keyword)
-    strict_filter = processing_tier == "weekly"
 
     processed = 0
     for event in events:
@@ -63,7 +63,7 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
                 await queries.mark_event_processed(event["id"])
                 continue
 
-            if not _keyword_passes(text, strict=strict_filter):
+            if not _keyword_passes(text, core_kw, context_kw, strict=strict_filter):
                 print(f"[processor] Keyword skip {event['id']} (tier={processing_tier})")
                 await queries.mark_event_processed(event["id"])
                 continue
@@ -83,7 +83,7 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
                 await queries.mark_event_processed(event["id"])
                 continue
 
-            # Save RAW classified data to Obsidian (regardless of draft approval)
+            # Save RAW to Obsidian immediately after classification
             try:
                 from bot.services.obsidian import save_raw_to_obsidian
                 await save_raw_to_obsidian(

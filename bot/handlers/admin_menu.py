@@ -17,6 +17,7 @@ class AdminFSM(StatesGroup):
     waiting_publish_channel_locale = State()
     waiting_prompt_key = State()
     waiting_prompt_value = State()
+    waiting_keyword_add = State()  # data: kw_type = 'core' | 'context'
 
 
 # ── Main menu ──────────────────────────────────────────────────────────────
@@ -32,7 +33,8 @@ def main_menu_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🤖 Промпты Claude", callback_data="menu:prompts"),
         ],
         [
-            InlineKeyboardButton(text="⚙️ Фильтры и настройки", callback_data="menu:settings"),
+            InlineKeyboardButton(text="🔑 Ключевые слова", callback_data="menu:keywords"),
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
         ],
     ])
 
@@ -370,6 +372,163 @@ async def menu_settings(callback: CallbackQuery) -> None:
     )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     await callback.answer()
+
+
+# ── Keywords ───────────────────────────────────────────────────────────────
+
+def _kw_list(raw: str) -> list[str]:
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+
+def keywords_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 CORE ключевые слова", callback_data="kw:view:core")],
+        [InlineKeyboardButton(text="📎 CONTEXT ключевые слова", callback_data="kw:view:context")],
+        [InlineKeyboardButton(text="➕ Добавить CORE", callback_data="kw:add:core")],
+        [InlineKeyboardButton(text="➕ Добавить CONTEXT", callback_data="kw:add:context")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")],
+    ])
+
+
+@router.callback_query(F.data == "menu:keywords")
+async def menu_keywords(callback: CallbackQuery) -> None:
+    core_raw = await queries.get_setting("filter_core_keywords", "")
+    context_raw = await queries.get_setting("filter_context_keywords", "")
+    core_count = len(_kw_list(core_raw))
+    context_count = len(_kw_list(context_raw))
+    text = (
+        "<b>🔑 Управление ключевыми словами</b>\n\n"
+        "<b>CORE</b> — главные слова. Достаточно 1 совпадения — текст проходит фильтр.\n"
+        f"Сейчас: <b>{core_count} слов</b>\n\n"
+        "<b>CONTEXT</b> — вспомогательные. Нужно 2+ совпадения (если нет ни одного CORE).\n"
+        f"Сейчас: <b>{context_count} слов</b>\n\n"
+        "Для государственных источников (kremlin.ru, gov.am) требуется хотя бы 1 CORE-слово."
+    )
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keywords_menu_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("kw:view:"))
+async def kw_view(callback: CallbackQuery) -> None:
+    kw_type = callback.data.split(":")[2]
+    setting_key = f"filter_{kw_type}_keywords"
+    raw = await queries.get_setting(setting_key, "")
+    words = _kw_list(raw)
+    label = "CORE" if kw_type == "core" else "CONTEXT"
+
+    if not words:
+        await callback.answer(f"Список {label} пуст.", show_alert=True)
+        return
+
+    # Each keyword becomes a ❌-button for deletion
+    buttons = []
+    for i, w in enumerate(words):
+        buttons.append([InlineKeyboardButton(
+            text=f"❌ {w}",
+            callback_data=f"kw:del:{kw_type}:{i}",
+        )])
+    buttons.append([InlineKeyboardButton(text="➕ Добавить", callback_data=f"kw:add:{kw_type}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:keywords")])
+
+    await callback.message.edit_text(
+        f"<b>🔑 {label} ключевые слова ({len(words)}):</b>\n\n"
+        + "\n".join(f"• <code>{w}</code>" for w in words),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("kw:del:"))
+async def kw_delete(callback: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    _, _, kw_type, idx_str = callback.data.split(":")
+    setting_key = f"filter_{kw_type}_keywords"
+    raw = await queries.get_setting(setting_key, "")
+    words = _kw_list(raw)
+    idx = int(idx_str)
+    if 0 <= idx < len(words):
+        removed = words.pop(idx)
+        await queries.set_setting(setting_key, ",".join(words))
+        # Reset ingestion cache so new keywords take effect
+        import bot.services.ingestion as ing
+        ing._cached_core_kw = None
+        await callback.answer(f"Удалено: {removed}", show_alert=True)
+    await kw_view(callback)
+
+
+@router.callback_query(F.data.startswith("kw:add:"))
+async def kw_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    kw_type = callback.data.split(":")[2]
+    label = "CORE" if kw_type == "core" else "CONTEXT"
+    await state.set_state(AdminFSM.waiting_keyword_add)
+    await state.update_data(kw_type=kw_type)
+    await callback.message.edit_text(
+        f"<b>➕ Добавить {label} ключевое слово</b>\n\n"
+        "Введи одно слово или фразу (на русском или английском).\n"
+        "Несколько слов — через запятую: <code>слово1, слово2</code>\n\n"
+        "Отправь /cancel для отмены.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminFSM.waiting_keyword_add)
+async def kw_add_save(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
+    if message.text.strip() == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_menu_kb())
+        return
+
+    data = await state.get_data()
+    kw_type = data.get("kw_type", "core")
+    setting_key = f"filter_{kw_type}_keywords"
+    label = "CORE" if kw_type == "core" else "CONTEXT"
+
+    # Parse new words (comma-separated)
+    new_words = [w.strip().lower() for w in message.text.split(",") if w.strip()]
+    if not new_words:
+        await message.answer("Не распознал слова. Попробуй ещё раз.")
+        return
+
+    raw = await queries.get_setting(setting_key, "")
+    existing = _kw_list(raw)
+    added = []
+    for w in new_words:
+        if w not in existing:
+            existing.append(w)
+            added.append(w)
+
+    await queries.set_setting(setting_key, ",".join(existing))
+
+    # Reset ingestion cache
+    import bot.services.ingestion as ing
+    ing._cached_core_kw = None
+
+    await state.clear()
+    if added:
+        await message.answer(
+            f"✅ Добавлено в <b>{label}</b>: {', '.join(f'<code>{w}</code>' for w in added)}\n"
+            f"Всего слов: {len(existing)}",
+            parse_mode="HTML",
+            reply_markup=main_menu_kb(),
+        )
+    else:
+        await message.answer(
+            f"⚠️ Все слова уже есть в списке {label}.",
+            reply_markup=main_menu_kb(),
+        )
 
 
 # ── Back to main ───────────────────────────────────────────────────────────
