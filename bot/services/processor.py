@@ -184,12 +184,18 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
             processed += 1
 
         except Exception as e:
-            print(f"[processor] Error processing cluster leader {representative['id']}: {e}")
-            for ev in cluster_events_list:
-                try:
-                    await queries.mark_event_processed(ev["id"])
-                except Exception:
-                    pass
+            err_str = str(e)
+            # API errors (no credits, rate limit) — keep events in queue for retry
+            if any(kw in err_str for kw in ("credit balance", "rate_limit", "529", "overloaded", "GEMINI", "quota")):
+                print(f"[processor] API error on {representative['id']}, keeping in queue: {e}")
+            else:
+                # Other errors (bad JSON, missing field) — mark processed to avoid infinite loop
+                print(f"[processor] Processing error on {representative['id']}, marking done: {e}")
+                for ev in cluster_events_list:
+                    try:
+                        await queries.mark_event_processed(ev["id"])
+                    except Exception:
+                        pass
 
     return processed
 
@@ -351,12 +357,16 @@ async def process_by_source_type(bot: Bot, source_type: str) -> int:
                 await queries.mark_event_processed(ev["id"])
             processed += 1
         except Exception as e:
-            print(f"[processor] Error cluster {representative['id']}: {e}")
-            for ev in cluster_events_list:
-                try:
-                    await queries.mark_event_processed(ev["id"])
-                except Exception:
-                    pass
+            err_str = str(e)
+            if any(kw in err_str for kw in ("credit balance", "rate_limit", "529", "overloaded", "GEMINI", "quota")):
+                print(f"[processor] API error on {representative['id']}, keeping in queue: {e}")
+            else:
+                print(f"[processor] Processing error on {representative['id']}, marking done: {e}")
+                for ev in cluster_events_list:
+                    try:
+                        await queries.mark_event_processed(ev["id"])
+                    except Exception:
+                        pass
     return processed
 
 

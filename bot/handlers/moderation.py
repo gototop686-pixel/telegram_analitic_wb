@@ -449,11 +449,21 @@ async def handle_process_choice(callback: CallbackQuery) -> None:
                 count = await process_unprocessed_events(callback.bot)
             else:
                 count = await process_by_source_type(callback.bot, source_type)
-            await callback.message.answer(
-                f"✅ Обработано через Claude: <b>{count}</b> событий\n"
-                f"Черновики отправлены на проверку — нажми <b>📝 Черновики</b>.",
-                parse_mode="HTML",
-            )
+            if count == 0:
+                await callback.message.answer(
+                    "⚠️ <b>Обработано 0 событий.</b>\n\n"
+                    "Возможные причины:\n"
+                    "• <code>GEMINI_API_KEY</code> не добавлен в Railway Variables\n"
+                    "• Баланс Anthropic (Claude) исчерпан\n"
+                    "• Все события отфильтрованы по ключевым словам\n\n"
+                    "Добавь <code>GEMINI_API_KEY</code> в Railway → Variables.",
+                    parse_mode="HTML",
+                )
+            else:
+                await callback.message.answer(
+                    f"✅ Обработано: <b>{count}</b> событий → опубликовано в каналы.",
+                    parse_mode="HTML",
+                )
         except Exception as e:
             await callback.message.answer(f"Ошибка: {e}")
 
