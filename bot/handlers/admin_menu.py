@@ -132,6 +132,10 @@ async def src_delete(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "src:add:telegram")
 async def src_add_tg(callback: CallbackQuery, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
     await state.set_state(AdminFSM.waiting_tg_channel)
     await callback.message.edit_text(
         "Введи username TG канала для мониторинга.\n"
@@ -145,6 +149,10 @@ async def src_add_tg(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminFSM.waiting_tg_channel)
 async def fsm_add_tg(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
     if message.text == "/cancel":
         await state.clear()
         await message.answer("Отменено.", reply_markup=main_menu_kb())
@@ -162,6 +170,10 @@ async def fsm_add_tg(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "src:add:rss")
 async def src_add_rss(callback: CallbackQuery, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
     await state.set_state(AdminFSM.waiting_rss_url)
     await callback.message.edit_text(
         "Введи URL RSS-ленты и язык.\n"
@@ -174,6 +186,10 @@ async def src_add_rss(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminFSM.waiting_rss_url)
 async def fsm_add_rss(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
     if message.text == "/cancel":
         await state.clear()
         await message.answer("Отменено.", reply_markup=main_menu_kb())
@@ -241,6 +257,10 @@ async def ch_delete(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "ch:add")
 async def ch_add(callback: CallbackQuery, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
     await state.set_state(AdminFSM.waiting_publish_channel_id)
     await callback.message.edit_text(
         "Введи данные канала:\n"
@@ -255,6 +275,10 @@ async def ch_add(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminFSM.waiting_publish_channel_id)
 async def fsm_add_channel(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
     if message.text == "/cancel":
         await state.clear()
         await message.answer("Отменено.", reply_markup=main_menu_kb())
@@ -316,6 +340,10 @@ async def pr_edit(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AdminFSM.waiting_prompt_value)
 async def fsm_save_prompt(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
     if message.text == "/cancel":
         await state.clear()
         await message.answer("Отменено.", reply_markup=main_menu_kb())

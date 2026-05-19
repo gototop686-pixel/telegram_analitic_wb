@@ -506,14 +506,7 @@ async def _do_offer_analysis(message: Message, text: str, filename: str, user_id
         await message.answer(f"Ошибка анализа: {e}")
 
 
-# keep old handler name for compatibility — now unreachable but safe
-@router.message(F.text == "/offer_dummy_placeholder")
-async def _offer_placeholder(message: Message) -> None:
-    pass  # replaced by handle_document above
-
-
-# old inline handler for compat
-@router.message(F.text.startswith("/offer") & ~F.text.startswith("/offer_dummy"))
+@router.message(Command("offer"))
 async def handle_offer_text_cmd(message: Message) -> None:
     moderator_ids = await queries.get_moderator_ids()
     if message.from_user.id not in moderator_ids:

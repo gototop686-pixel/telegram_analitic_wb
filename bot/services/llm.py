@@ -193,12 +193,12 @@ async def analyze_offer(text: str) -> dict:
         max_tokens=4000,
         messages=[{"role": "user", "content": prompt}],
     )
+    await _log_cost("analyze_offer", response, "claude-sonnet-4-6")
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    # Trim to last closing brace in case of truncation
     last_brace = raw.rfind("}")
     if last_brace != -1:
         raw = raw[:last_brace + 1]
