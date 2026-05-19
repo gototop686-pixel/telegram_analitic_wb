@@ -5,11 +5,13 @@ import os
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.db.pool import get_pool, close_pool
 from bot.handlers import moderation
+from bot.handlers import admin_menu
 from bot.services.ingestion import run_all_ingestion
 from bot.services.processor import process_unprocessed_events
 
@@ -97,7 +99,8 @@ async def handle_tg_channel_post(bot: Bot, post) -> None:
 
 def main() -> None:
     bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(admin_menu.router)
     dp.include_router(moderation.router)
 
     # Store channel posts

@@ -147,6 +147,71 @@ async def get_sources_by_type() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_setting(key: str, default: str = "") -> str:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT value FROM bot_settings WHERE key=$1", key)
+    return row["value"] if row else default
+
+
+async def set_setting(key: str, value: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO bot_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=NOW()",
+        key, value,
+    )
+
+
+async def add_source(source_type: str, source_tier: str, locale: str, identifier: str) -> bool:
+    pool = await get_pool()
+    try:
+        await pool.execute(
+            "INSERT INTO source_registry (source_type, source_tier, locale, identifier) VALUES ($1,$2,$3,$4)",
+            source_type, source_tier, locale, identifier,
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def deactivate_source(source_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE source_registry SET active=FALSE WHERE id=$1", source_id)
+
+
+async def get_sources_paginated(source_type: str | None = None, limit: int = 10, offset: int = 0) -> list[dict]:
+    pool = await get_pool()
+    if source_type:
+        rows = await pool.fetch(
+            "SELECT * FROM source_registry WHERE active=TRUE AND source_type=$1 ORDER BY id LIMIT $2 OFFSET $3",
+            source_type, limit, offset,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT * FROM source_registry WHERE active=TRUE ORDER BY source_type, id LIMIT $1 OFFSET $2",
+            limit, offset,
+        )
+    return [dict(r) for r in rows]
+
+
+async def add_publish_channel(locale: str, channel_id: int, label: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO channel_routing (locale, channel_id, label) VALUES ($1,$2,$3) ON CONFLICT (channel_id) DO NOTHING",
+        locale, channel_id, label,
+    )
+
+
+async def remove_publish_channel(channel_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE channel_routing SET active=FALSE WHERE channel_id=$1", channel_id)
+
+
+async def get_publish_channels_full() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch("SELECT * FROM channel_routing WHERE active=TRUE ORDER BY locale")
+    return [dict(r) for r in rows]
+
+
 async def get_bot_stats() -> dict:
     pool = await get_pool()
     raw_count = await pool.fetchval("SELECT COUNT(*) FROM raw_events")

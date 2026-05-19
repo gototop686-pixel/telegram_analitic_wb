@@ -55,11 +55,14 @@ CLASSIFY_PROMPT = """{context}
 
 async def classify_and_summarize(text: str) -> dict:
     import json
+    from bot.db import queries as db_queries
     client = get_client()
+    # Load context from DB (admin can edit via /menu)
+    context = await db_queries.get_setting("gototop_context", GOTOTOP_CONTEXT)
     prompt = CLASSIFY_PROMPT.format(
         taxonomy=", ".join(TAXONOMY),
         text=text[:3000],
-    )
+    ).replace(GOTOTOP_CONTEXT, context, 1)
     response = await client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=800,

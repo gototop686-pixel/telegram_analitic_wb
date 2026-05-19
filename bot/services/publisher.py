@@ -24,13 +24,18 @@ async def publish_draft(draft: dict, locale: str, bot: Bot) -> int:
 
 
 async def send_draft_to_moderators(
-    draft_id: int, body_ru: str, body_hy: str, bot: Bot, tier_label: str = "🟡 Дайджест"
+    draft_id: int, body_ru: str, body_hy: str, bot: Bot,
+    tier_label: str = "🟡 Дайджест", source_info: str = "",
+    label: str = "", confidence: float = 0,
 ) -> None:
     from bot.handlers.moderation import draft_keyboard
 
     moderator_ids = await queries.get_moderator_ids()
+    conf_str = f"{confidence:.0%}" if confidence else ""
     preview = (
-        f"📋 <b>Черновик #{draft_id}</b> {tier_label}\n\n"
+        f"📋 <b>Черновик #{draft_id}</b> {tier_label}\n"
+        f"🏷 {label} {conf_str}\n"
+        f"🔗 {source_info}\n\n"
         f"🇷🇺 <b>RU:</b>\n{body_ru[:800]}\n\n"
         f"🇦🇲 <b>HY:</b>\n{body_hy[:400] if body_hy else '—'}"
     )
