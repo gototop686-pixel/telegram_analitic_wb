@@ -891,6 +891,66 @@ async def _do_offer_analysis(message: Message, text: str, filename: str, user_id
         await message.answer(f"Ошибка анализа: {e}")
 
 
+@router.message(Command("dbcheck"))
+async def cmd_dbcheck(message: Message) -> None:
+    """Check DB schema — verify all migrations ran."""
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        return
+    from bot.db.pool import get_pool
+    pool = await get_pool()
+    checks = []
+
+    # Check tables exist
+    for table in ["publishes", "strategy_proposals", "stored_offers", "strategies", "raw_events", "drafts"]:
+        row = await pool.fetchrow(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=$1)", table
+        )
+        exists = row[0]
+        checks.append(f"{'✅' if exists else '❌'} таблица <code>{table}</code>")
+
+    # Check key columns
+    col_checks = [
+        ("publishes", "obsidian_path"),
+        ("publishes", "market"),
+        ("publishes", "tg_message_id"),
+    ]
+    for tbl, col in col_checks:
+        row = await pool.fetchrow(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2)",
+            tbl, col
+        )
+        exists = row[0]
+        checks.append(f"{'✅' if exists else '❌'} колонка <code>{tbl}.{col}</code>")
+
+    # Check GEMINI key
+    import os
+    gemini_ok = bool(os.environ.get("GEMINI_API_KEY"))
+    anthropic_ok = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    checks.append(f"{'✅' if gemini_ok else '❌'} <code>GEMINI_API_KEY</code>")
+    checks.append(f"{'✅' if anthropic_ok else '❌'} <code>ANTHROPIC_API_KEY</code>")
+
+    # Count channels
+    channels = await queries.get_publish_channels_full()
+    checks.append(f"✅ Каналов публикации: <b>{len(channels)}</b>")
+
+    text = "<b>🔍 Диагностика БД и окружения</b>\n\n" + "\n".join(checks)
+    # Recommendations
+    missing = [c for c in checks if c.startswith("❌")]
+    if missing:
+        text += "\n\n⚠️ <b>Нужно исправить:</b>"
+        if any("strategy_proposals" in c for c in missing):
+            text += "\n• Запусти миграцию 007 в Railway PostgreSQL"
+        if any("obsidian_path" in c or "market" in c for c in missing):
+            text += "\n• Запусти миграцию 007 в Railway PostgreSQL"
+        if any("GEMINI" in c for c in missing):
+            text += "\n• Добавь <code>GEMINI_API_KEY</code> в Railway Variables"
+    else:
+        text += "\n\n✅ <b>Всё в порядке!</b>"
+
+    await message.answer(text, parse_mode="HTML")
+
+
 @router.message(Command("check_obsidian"))
 async def cmd_check_obsidian(message: Message) -> None:
     """Diagnose Obsidian GitHub connection."""
