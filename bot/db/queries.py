@@ -103,3 +103,39 @@ async def get_moderator_ids() -> list[int]:
         "SELECT tg_user_id FROM rbac_users WHERE active=TRUE AND role IN ('admin','moderator')"
     )
     return [r["tg_user_id"] for r in rows]
+
+
+async def get_admin_ids() -> list[int]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT tg_user_id FROM rbac_users WHERE active=TRUE AND role='admin'"
+    )
+    return [r["tg_user_id"] for r in rows]
+
+
+async def upsert_user(tg_user_id: int, username: str | None, role: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO rbac_users (tg_user_id, username, role)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (tg_user_id) DO UPDATE SET role=$3, username=$2, active=TRUE
+        """,
+        tg_user_id, username, role,
+    )
+
+
+async def get_bot_stats() -> dict:
+    pool = await get_pool()
+    raw_count = await pool.fetchval("SELECT COUNT(*) FROM raw_events")
+    unprocessed = await pool.fetchval("SELECT COUNT(*) FROM raw_events WHERE processed_at IS NULL")
+    drafts_pending = await pool.fetchval("SELECT COUNT(*) FROM drafts WHERE status='pending'")
+    published = await pool.fetchval("SELECT COUNT(*) FROM publishes")
+    sources = await pool.fetchval("SELECT COUNT(*) FROM source_registry WHERE active=TRUE")
+    return {
+        "raw_total": raw_count,
+        "unprocessed": unprocessed,
+        "drafts_pending": drafts_pending,
+        "published": published,
+        "sources": sources,
+    }
