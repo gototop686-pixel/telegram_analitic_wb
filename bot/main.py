@@ -130,6 +130,11 @@ def main() -> None:
         await stop_monitoring()
         await on_shutdown(bot)
 
+    app.on_startup.append(_startup)
+    app.on_cleanup.append(_shutdown)
+
+    web.run_app(app, host="0.0.0.0", port=PORT)
+
 
 async def _start_telethon():
     try:
@@ -137,11 +142,6 @@ async def _start_telethon():
         await start_monitoring()
     except Exception as e:
         print(f"[telethon] Error: {e}")
-
-    app.on_startup.append(_startup)
-    app.on_cleanup.append(_shutdown)
-
-    web.run_app(app, host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
