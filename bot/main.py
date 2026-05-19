@@ -45,14 +45,25 @@ def build_scheduler(bot: Bot) -> AsyncIOScheduler:
     async def _ingest():
         await run_all_ingestion()
 
-    async def _process():
-        await process_unprocessed_events(bot)
+    # Tier 1 (frequent): Telegram channels, YouTube, WB-direct — every 6 hours
+    async def _process_frequent():
+        await process_unprocessed_events(bot, processing_tier="frequent")
+
+    # Tier 2 (daily): media RSS (vc.ru, oborot.ru, google news) — once per day at 10:00
+    async def _process_daily():
+        await process_unprocessed_events(bot, processing_tier="daily")
+
+    # Tier 3 (weekly): regulatory/government RSS (kremlin, fas, gov.am) — Mondays at 11:00
+    async def _process_weekly():
+        await process_unprocessed_events(bot, processing_tier="weekly")
 
     async def _digest():
         await _send_daily_digest(bot)
 
     scheduler.add_job(_ingest, "interval", minutes=30, id="ingest")
-    scheduler.add_job(_process, "interval", minutes=15, id="process")
+    scheduler.add_job(_process_frequent, "interval", hours=6, id="process_frequent")
+    scheduler.add_job(_process_daily, "cron", hour=10, minute=0, id="process_daily")
+    scheduler.add_job(_process_weekly, "cron", day_of_week="mon", hour=11, minute=0, id="process_weekly")
     scheduler.add_job(_digest, "cron", hour=9, minute=0, id="digest")
     return scheduler
 

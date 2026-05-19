@@ -46,6 +46,58 @@ async def get_unprocessed_events(limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_unprocessed_events_tiered(processing_tier: str, limit: int = 20) -> list[dict]:
+    pool = await get_pool()
+    if processing_tier == "frequent":
+        # Telegram, YouTube, blog-tier, or any WB-related identifier
+        rows = await pool.fetch(
+            """
+            SELECT re.* FROM raw_events re
+            LEFT JOIN source_registry sr ON re.source_id = sr.id
+            WHERE re.processed_at IS NULL
+              AND (
+                sr.source_type IN ('telegram', 'youtube')
+                OR sr.source_tier = 'blog'
+                OR sr.identifier ILIKE '%wildberries%'
+              )
+            ORDER BY re.fetched_at LIMIT $1
+            """,
+            limit,
+        )
+    elif processing_tier == "daily":
+        # Media-tier RSS (not telegram/youtube — those are in 'frequent')
+        rows = await pool.fetch(
+            """
+            SELECT re.* FROM raw_events re
+            LEFT JOIN source_registry sr ON re.source_id = sr.id
+            WHERE re.processed_at IS NULL
+              AND sr.source_tier = 'media'
+              AND sr.source_type NOT IN ('telegram', 'youtube')
+            ORDER BY re.fetched_at LIMIT $1
+            """,
+            limit,
+        )
+    elif processing_tier == "weekly":
+        # Official government sources (kremlin, fas, gov.am, etc.) — not WB-related
+        rows = await pool.fetch(
+            """
+            SELECT re.* FROM raw_events re
+            LEFT JOIN source_registry sr ON re.source_id = sr.id
+            WHERE re.processed_at IS NULL
+              AND sr.source_tier = 'official'
+              AND sr.identifier NOT ILIKE '%wildberries%'
+            ORDER BY re.fetched_at LIMIT $1
+            """,
+            limit,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT * FROM raw_events WHERE processed_at IS NULL ORDER BY fetched_at LIMIT $1",
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
 async def mark_event_processed(event_id: int) -> None:
     pool = await get_pool()
     await pool.execute(

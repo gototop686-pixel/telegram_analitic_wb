@@ -4,14 +4,36 @@ from bot.db import queries
 from bot.services import llm
 from bot.services.publisher import send_draft_to_moderators
 
+# Keywords used for free pre-filtering before calling Claude.
+# If none of these appear in the text, we skip Claude entirely.
+_KEYWORDS = [
+    "wildberries", "вайлдберриз", "вб ", " wb ", "wb,", "wb.",
+    "маркетплейс", "комиссия", "логистика", "тариф", "штраф",
+    "таможня", "еаэс", "оферта", "продавец", "селлер",
+    "фас", "антимонополь", "озон", "ozon", "kaspi", "каспи",
+    "ввоз товар", "импорт", "торговля арм",
+]
 
-async def process_unprocessed_events(bot: Bot) -> int:
-    events = await queries.get_unprocessed_events(limit=20)
 
-    # Load settings from DB
+def _keyword_passes(text: str) -> bool:
+    low = text.lower()
+    return any(kw in low for kw in _KEYWORDS)
+
+
+async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> int:
+    max_events = int(await queries.get_setting("max_events_per_run", "10"))
+
+    if processing_tier == "all":
+        events = await queries.get_unprocessed_events(limit=max_events)
+    else:
+        events = await queries.get_unprocessed_events_tiered(processing_tier, limit=max_events)
+
     min_confidence = float(await queries.get_setting("min_confidence", "0.45"))
     relevant_labels_str = await queries.get_setting("relevant_labels", "")
     relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else set()
+
+    # For weekly (regulatory) tier, use stricter keyword filtering
+    strict_keywords = processing_tier == "weekly"
 
     processed = 0
     for event in events:
@@ -21,12 +43,17 @@ async def process_unprocessed_events(bot: Bot) -> int:
                 await queries.mark_event_processed(event["id"])
                 continue
 
+            # Free keyword pre-filter — skip Claude if text is clearly off-topic
+            if not _keyword_passes(text):
+                print(f"[processor] Keyword skip event {event['id']} (tier={processing_tier})")
+                await queries.mark_event_processed(event["id"])
+                continue
+
             classification = await llm.classify_and_summarize(text)
             confidence = classification.get("confidence", 0)
             label = classification.get("label", "")
             alert_tier = classification.get("alert_tier", 2)
 
-            # Relevance filter: skip low-confidence or off-topic events
             is_relevant = (
                 confidence >= min_confidence
                 and (not relevant_labels or label in relevant_labels or alert_tier == 1)
