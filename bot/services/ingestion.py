@@ -274,6 +274,30 @@ async def ingest_wb_release_notes() -> int:
         return 0
 
 
+async def run_telegram_ingestion() -> int:
+    sources = await queries.get_active_sources("telegram")
+    saved = 0
+    for source in sources:
+        saved += await ingest_rss(source) if source["source_type"] == "rss" else 0
+    return saved
+
+
+async def run_rss_ingestion() -> int:
+    sources = await queries.get_active_sources("rss")
+    saved = 0
+    for source in sources:
+        saved += await ingest_rss(source)
+    return saved
+
+
+async def run_google_news_ingestion() -> int:
+    return await ingest_google_news()
+
+
+async def run_forum_ingestion() -> int:
+    return await ingest_forum_rss()
+
+
 async def run_all_ingestion() -> dict:
     sources = await queries.get_active_sources()
     results = {"rss": 0, "youtube": 0, "google_news": 0, "forums": 0, "wb_release": 0}

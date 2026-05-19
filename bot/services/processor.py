@@ -135,6 +135,86 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
     return processed
 
 
+async def batch_keyword_filter() -> dict:
+    """Free pre-pass: mark irrelevant events as processed without calling Claude."""
+    events = await queries.get_unprocessed_events(limit=1000)
+    core_kw, context_kw = await _load_keywords()
+    skipped = 0
+    kept = 0
+    for event in events:
+        text = f"{event.get('title', '')}\n{event.get('body', '')}"
+        if len(text.strip()) < 30 or not _keyword_passes(text, core_kw, context_kw, strict=False):
+            await queries.mark_event_processed(event["id"])
+            skipped += 1
+        else:
+            kept += 1
+    return {"skipped": skipped, "kept": kept}
+
+
+async def process_by_source_type(bot, source_type: str) -> int:
+    """Process unprocessed events filtered by source_type."""
+    max_events = int(await queries.get_setting("max_events_per_run", "30"))
+    min_confidence = float(await queries.get_setting("min_confidence", "0.45"))
+    relevant_labels_str = await queries.get_setting("relevant_labels", "")
+    relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else set()
+    core_kw, context_kw = await _load_keywords()
+    strategies = await queries.get_strategies_for_context(limit=5)
+
+    events = await queries.get_unprocessed_events_by_source_type(source_type, limit=max_events)
+    processed = 0
+    for event in events:
+        try:
+            text = f"{event.get('title', '')}\n{event.get('body', '')}"
+            if len(text.strip()) < 30:
+                await queries.mark_event_processed(event["id"])
+                continue
+            if not _keyword_passes(text, core_kw, context_kw):
+                await queries.mark_event_processed(event["id"])
+                continue
+            classification = await llm.classify_and_summarize(text)
+            confidence = classification.get("confidence", 0)
+            label = classification.get("label", "")
+            alert_tier = classification.get("alert_tier", 2)
+            is_relevant = (
+                confidence >= min_confidence
+                and (not relevant_labels or label in relevant_labels or alert_tier == 1)
+            )
+            if not is_relevant:
+                await queries.mark_event_processed(event["id"])
+                continue
+            try:
+                from bot.services.obsidian import save_raw_to_obsidian
+                await save_raw_to_obsidian(
+                    source_type=event.get("source_type", ""),
+                    source_url=event.get("url", ""),
+                    title=event.get("title", ""),
+                    body=event.get("body", ""),
+                    classification=classification,
+                    event_id=event["id"],
+                )
+            except Exception:
+                pass
+            post = await llm.generate_post(
+                label=label,
+                summary_ru=classification.get("summary_ru", ""),
+                entities=classification.get("entities", []),
+                confidence_band=_get_confidence_band(classification),
+                strategies=strategies,
+            )
+            draft_id = await queries.create_draft(post.get("body_ru", ""), post.get("body_hy", ""))
+            await send_draft_to_moderators(
+                draft_id=draft_id, body_ru=post.get("body_ru", ""),
+                body_hy=post.get("body_hy", ""), bot=bot,
+                tier_label="🔴 КРИТИЧНО" if alert_tier == 1 else "🟡 Дайджест",
+                source_info=_format_source(event), label=label, confidence=confidence,
+            )
+            await queries.mark_event_processed(event["id"])
+            processed += 1
+        except Exception as e:
+            print(f"[processor] Error {event['id']}: {e}")
+    return processed
+
+
 def _format_source(event: dict) -> str:
     source_type = event.get("source_type", "")
     url = event.get("url", "")

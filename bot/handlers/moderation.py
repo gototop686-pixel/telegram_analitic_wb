@@ -256,12 +256,154 @@ async def kb_status(message: Message) -> None:
 
 @router.message(F.text == "▶️ Парсинг")
 async def kb_ingest(message: Message) -> None:
-    await cmd_ingest(message)
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    await message.answer(
+        "▶️ <b>Выбери что парсить:</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Telegram каналы", callback_data="ingest:telegram")],
+            [InlineKeyboardButton(text="📡 RSS источники", callback_data="ingest:rss")],
+            [InlineKeyboardButton(text="🔍 Google News", callback_data="ingest:google")],
+            [InlineKeyboardButton(text="📰 Форумы (VC.ru, Ozon)", callback_data="ingest:forums")],
+            [InlineKeyboardButton(text="🌐 Всё сразу", callback_data="ingest:all")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("ingest:"))
+async def handle_ingest_choice(callback: CallbackQuery) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if callback.from_user.id not in moderator_ids:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    choice = callback.data.split(":")[1]
+    labels = {
+        "telegram": "Telegram каналы", "rss": "RSS источники",
+        "google": "Google News", "forums": "Форумы", "all": "все источники",
+    }
+    await callback.message.edit_text(f"⏳ Парсинг: {labels.get(choice)}...")
+    await callback.answer()
+
+    async def _run():
+        try:
+            from bot.services.ingestion import (
+                run_all_ingestion, run_rss_ingestion,
+                run_google_news_ingestion, run_forum_ingestion,
+            )
+            if choice == "all":
+                r = await run_all_ingestion()
+                text = (
+                    f"✅ Парсинг завершён:\n"
+                    f"• RSS: {r['rss']} новых\n"
+                    f"• Google News: {r['google_news']} новых\n"
+                    f"• Форумы: {r.get('forums', 0)} новых\n"
+                    f"• WB Release: {r.get('wb_release', 0)} новых"
+                )
+            elif choice == "rss":
+                n = await run_rss_ingestion()
+                text = f"✅ RSS: {n} новых событий"
+            elif choice == "google":
+                n = await run_google_news_ingestion()
+                text = f"✅ Google News: {n} новых событий"
+            elif choice == "forums":
+                n = await run_forum_ingestion()
+                text = f"✅ Форумы: {n} новых событий"
+            else:
+                text = "✅ Telegram каналы парсятся через Telethon автоматически."
+            await callback.message.answer(text)
+        except Exception as e:
+            await callback.message.answer(f"Ошибка парсинга: {e}")
+
+    asyncio.create_task(_run())
 
 
 @router.message(F.text == "🤖 Обработать")
 async def kb_process(message: Message) -> None:
-    await cmd_process(message)
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    # Show queue summary
+    by_type = await queries.get_unprocessed_by_type()
+    total = sum(r["cnt"] for r in by_type)
+    if total == 0:
+        await message.answer("✅ Очередь пуста — все события обработаны.")
+        return
+    lines = [f"🤖 <b>В очереди: {total} событий</b>\n"]
+    type_icons = {"telegram": "📱", "rss": "📡", "youtube": "▶️", "offer": "📄"}
+    buttons = []
+    for row in by_type:
+        t = row["source_type"]
+        icon = type_icons.get(t, "📌")
+        lines.append(f"{icon} {t.upper()}: <b>{row['cnt']}</b>")
+        buttons.append([InlineKeyboardButton(
+            text=f"{icon} Обработать {t.upper()} ({row['cnt']})",
+            callback_data=f"process:type:{t}",
+        )])
+    lines.append("\n<i>Совет: сначала очисти фильтром — это бесплатно и быстро.</i>")
+    buttons.insert(0, [InlineKeyboardButton(
+        text=f"🧹 Очистить нерелевантное (бесплатно)",
+        callback_data="process:filter",
+    )])
+    buttons.append([InlineKeyboardButton(
+        text=f"🌐 Обработать всё (до 30 событий)",
+        callback_data="process:type:all",
+    )])
+    await message.answer(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("process:"))
+async def handle_process_choice(callback: CallbackQuery) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if callback.from_user.id not in moderator_ids:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    action = callback.data.split(":")[2] if len(callback.data.split(":")) > 2 else ""
+
+    if callback.data == "process:filter":
+        await callback.message.edit_text("🧹 Запускаю бесплатный фильтр по ключевым словам...")
+        await callback.answer()
+        async def _filter():
+            try:
+                from bot.services.processor import batch_keyword_filter
+                result = await batch_keyword_filter()
+                await callback.message.answer(
+                    f"🧹 <b>Фильтрация завершена:</b>\n\n"
+                    f"❌ Удалено нерелевантных: <b>{result['skipped']}</b>\n"
+                    f"✅ Осталось для Claude: <b>{result['kept']}</b>\n\n"
+                    f"Теперь нажми <b>🤖 Обработать</b> снова.",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                await callback.message.answer(f"Ошибка: {e}")
+        asyncio.create_task(_filter())
+        return
+
+    source_type = action
+    label = "всё" if source_type == "all" else source_type.upper()
+    await callback.message.edit_text(f"⏳ Обрабатываю через Claude: {label}...")
+    await callback.answer()
+
+    async def _process():
+        try:
+            from bot.services.processor import process_unprocessed_events, process_by_source_type
+            if source_type == "all":
+                count = await process_unprocessed_events(callback.bot)
+            else:
+                count = await process_by_source_type(callback.bot, source_type)
+            await callback.message.answer(
+                f"✅ Обработано через Claude: <b>{count}</b> событий\n"
+                f"Черновики отправлены на проверку — нажми <b>📝 Черновики</b>.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await callback.message.answer(f"Ошибка: {e}")
+
+    asyncio.create_task(_process())
 
 
 @router.message(F.text == "⚙️ Управление")

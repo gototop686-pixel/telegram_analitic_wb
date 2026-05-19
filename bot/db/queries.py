@@ -129,6 +129,27 @@ async def get_pending_drafts(limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_unprocessed_by_type() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT source_type, COUNT(*) as cnt
+           FROM raw_events
+           WHERE processed_at IS NULL
+           GROUP BY source_type
+           ORDER BY cnt DESC"""
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_unprocessed_events_by_source_type(source_type: str, limit: int = 30) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM raw_events WHERE processed_at IS NULL AND source_type=$1 ORDER BY fetched_at LIMIT $2",
+        source_type, limit,
+    )
+    return [dict(r) for r in rows]
+
+
 async def approve_draft(draft_id: int, approved_by: int) -> None:
     pool = await get_pool()
     await pool.execute(
