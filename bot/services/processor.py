@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from aiogram import Bot
 
@@ -182,6 +183,8 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
             for ev in cluster_events_list:
                 await queries.mark_event_processed(ev["id"])
             processed += 1
+            # Pause between events to respect Gemini free tier (15 RPM)
+            await asyncio.sleep(5)
 
         except Exception as e:
             err_str = str(e)
@@ -356,6 +359,7 @@ async def process_by_source_type(bot: Bot, source_type: str) -> int:
             for ev in cluster_events_list:
                 await queries.mark_event_processed(ev["id"])
             processed += 1
+            await asyncio.sleep(5)
         except Exception as e:
             err_str = str(e)
             if any(kw in err_str.lower() for kw in ("credit balance", "rate_limit", "529", "overloaded", "gemini", "quota", "api error")):

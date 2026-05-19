@@ -18,22 +18,30 @@ def get_client() -> anthropic.AsyncAnthropic:
 
 
 async def _gemini(prompt: str, max_tokens: int = 1000) -> str:
-    """Call Gemini Flash (free tier). Falls back to Claude Haiku if key missing."""
+    """Call Gemini Flash (free tier = 15 RPM). Auto-retry on 429."""
+    import asyncio
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY not set")
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-            json=payload,
-        )
-    if resp.status_code != 200:
+    for attempt in range(3):
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                json=payload,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if resp.status_code == 429:
+            wait = 15 * (attempt + 1)  # 15s, 30s, 45s
+            print(f"[gemini] Rate limit (429), waiting {wait}s before retry {attempt+1}/3")
+            await asyncio.sleep(wait)
+            continue
         raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:200]}")
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    raise RuntimeError("Gemini error 429: quota exceeded after 3 retries")
 
 
 GOTOTOP_CONTEXT = """Ты аналитик компании GoToTop — консалтинговой компании для продавцов на Wildberries.
