@@ -148,21 +148,32 @@ async def handle_offer_upload(message: Message) -> None:
             return
 
         await message.answer("⏳ Скачиваю и анализирую документ...")
+        import asyncio
         file = await message.bot.get_file(message.document.file_id)
-        file_bytes = await message.bot.download_file(file.file_path)
+        try:
+            file_bytes = await asyncio.wait_for(
+                message.bot.download_file(file.file_path), timeout=30
+            )
+        except asyncio.TimeoutError:
+            await message.answer("Timeout при скачивании файла. Попробуй ещё раз.")
+            return
         raw = file_bytes.read() if hasattr(file_bytes, "read") else bytes(file_bytes)
 
         if "pdf" in mime:
             try:
                 import pdfplumber
                 with pdfplumber.open(io.BytesIO(raw)) as pdf:
-                    pages = [p.extract_text() or "" for p in pdf.pages]
-                text_to_analyze = "\n".join(pages)
+                    pages = []
+                    for page in pdf.pages[:25]:  # max 25 pages
+                        t = page.extract_text()
+                        if t:
+                            pages.append(t)
+                text_to_analyze = "\n".join(pages)[:10000]  # max 10k chars to Claude
             except Exception as e:
                 await message.answer(f"Ошибка чтения PDF: {e}")
                 return
         else:
-            text_to_analyze = raw.decode("utf-8", errors="ignore")
+            text_to_analyze = raw.decode("utf-8", errors="ignore")[:10000]
 
     elif message.caption:
         text_to_analyze = message.caption
