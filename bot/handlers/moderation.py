@@ -343,10 +343,14 @@ async def kb_process(message: Message) -> None:
         )])
     lines.append("\n<i>Совет: сначала очисти фильтром — это бесплатно и быстро.</i>")
     buttons.insert(0, [InlineKeyboardButton(
+        text="👁 Что в очереди (предпросмотр)",
+        callback_data="process:preview",
+    )])
+    buttons.insert(1, [InlineKeyboardButton(
         text="🗑 Архивировать старше 7 дней",
         callback_data="process:archive",
     )])
-    buttons.insert(1, [InlineKeyboardButton(
+    buttons.insert(2, [InlineKeyboardButton(
         text="🧹 Очистить нерелевантное (бесплатно)",
         callback_data="process:filter",
     )])
@@ -367,6 +371,27 @@ async def handle_process_choice(callback: CallbackQuery) -> None:
         await callback.answer("Нет доступа.", show_alert=True)
         return
     action = callback.data.split(":")[2] if len(callback.data.split(":")) > 2 else ""
+
+    if callback.data == "process:preview":
+        await callback.answer()
+        items = await queries.preview_unprocessed_titles(limit=30)
+        if not items:
+            await callback.message.answer("Очередь пуста.")
+            return
+        type_icons = {"telegram": "📱", "rss": "📡", "youtube": "▶️", "offer": "📄"}
+        lines = [f"👁 <b>В очереди (последние {len(items)}):</b>\n"]
+        for item in items:
+            icon = type_icons.get(item["source_type"], "📌")
+            title = item.get("title") or item.get("url") or "без названия"
+            date = str(item.get("fetched_at", ""))[:10]
+            src = item.get("source_id", "")
+            lines.append(f"{icon} <i>{date}</i> {src}\n    {title[:80]}")
+        await callback.message.answer(
+            "\n".join(lines),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return
 
     if callback.data == "process:archive":
         await callback.message.edit_text("🗑 Архивирую события старше 7 дней...")
@@ -449,7 +474,44 @@ async def kb_drafts(message: Message) -> None:
     moderator_ids = await queries.get_moderator_ids()
     if message.from_user.id not in moderator_ids:
         return
-    await show_pending_drafts(message)
+    drafts = await queries.get_pending_drafts(limit=1)
+    total_rows = await queries.get_pending_drafts(limit=100)
+    total = len(total_rows)
+    if total == 0:
+        await message.answer("✅ Нет черновиков на проверке.")
+        return
+    await message.answer(
+        f"📝 <b>Черновиков на проверке: {total}</b>\n\nЧто сделать?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Показать все", callback_data="drafts:show")],
+            [InlineKeyboardButton(text="❌ Отклонить все", callback_data="drafts:reject_all")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "drafts:show")
+async def drafts_show(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await show_pending_drafts(callback.message)
+
+
+@router.callback_query(F.data == "drafts:reject_all")
+async def drafts_reject_all(callback: CallbackQuery) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if callback.from_user.id not in moderator_ids:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    drafts = await queries.get_pending_drafts(limit=100)
+    count = 0
+    for d in drafts:
+        await queries.reject_draft(d["id"])
+        count += 1
+    await callback.message.edit_text(
+        f"❌ Отклонено черновиков: <b>{count}</b>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
 
 
 def _strip_html(text: str) -> str:

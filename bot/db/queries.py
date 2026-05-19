@@ -157,6 +157,22 @@ async def get_unprocessed_by_type() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def preview_unprocessed_titles(limit: int = 30) -> list[dict]:
+    """Return titles/sources of unprocessed events for free preview (no Claude)."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT re.id, re.source_type, re.title, re.url, re.fetched_at,
+                  COALESCE(sr.identifier, '') as source_id
+           FROM raw_events re
+           LEFT JOIN source_registry sr ON re.source_id = sr.id
+           WHERE re.processed_at IS NULL
+           ORDER BY re.fetched_at DESC
+           LIMIT $1""",
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_unprocessed_events_by_source_type(source_type: str, limit: int = 30) -> list[dict]:
     pool = await get_pool()
     rows = await pool.fetch(

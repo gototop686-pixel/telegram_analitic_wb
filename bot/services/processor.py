@@ -42,7 +42,12 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
     max_events = int(await queries.get_setting("max_events_per_run", "10"))
     min_confidence = float(await queries.get_setting("min_confidence", "0.45"))
     relevant_labels_str = await queries.get_setting("relevant_labels", "")
-    relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else set()
+    _default_labels = {
+        "Регуляторика_RU", "Регуляторика_AM", "Таможня_ЕАЭС",
+        "Маркетплейс_политика_WB", "Изменение_оферты", "Коммуникации_WB",
+        "Антимонопольное_ФАС", "Комиссии_логистика",
+    }
+    relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else _default_labels
 
     # Load keywords and strategies from DB once per run
     core_kw, context_kw = await _load_keywords()
@@ -156,7 +161,12 @@ async def process_by_source_type(bot, source_type: str) -> int:
     max_events = int(await queries.get_setting("max_events_per_run", "30"))
     min_confidence = float(await queries.get_setting("min_confidence", "0.45"))
     relevant_labels_str = await queries.get_setting("relevant_labels", "")
-    relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else set()
+    _default_labels = {
+        "Регуляторика_RU", "Регуляторика_AM", "Таможня_ЕАЭС",
+        "Маркетплейс_политика_WB", "Изменение_оферты", "Коммуникации_WB",
+        "Антимонопольное_ФАС", "Комиссии_логистика",
+    }
+    relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else _default_labels
     core_kw, context_kw = await _load_keywords()
     strategies = await queries.get_strategies_for_context(limit=5)
 
