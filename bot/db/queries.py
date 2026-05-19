@@ -313,3 +313,49 @@ async def get_bot_stats() -> dict:
         "published": published,
         "sources": sources,
     }
+
+
+# ── Strategies ─────────────────────────────────────────────────────────────
+
+async def save_strategy(title: str, body: str, category: str, created_by: int) -> int:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "INSERT INTO strategies (title, body, category, created_by) VALUES ($1,$2,$3,$4) RETURNING id",
+        title, body, category, created_by,
+    )
+    return row["id"]
+
+
+async def get_strategies(category: str | None = None, limit: int = 20) -> list[dict]:
+    pool = await get_pool()
+    if category and category != "all":
+        rows = await pool.fetch(
+            "SELECT * FROM strategies WHERE category=$1 ORDER BY created_at DESC LIMIT $2",
+            category, limit,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT * FROM strategies ORDER BY created_at DESC LIMIT $1", limit
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_strategy(strategy_id: int) -> dict | None:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM strategies WHERE id=$1", strategy_id)
+    return dict(row) if row else None
+
+
+async def delete_strategy(strategy_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("DELETE FROM strategies WHERE id=$1", strategy_id)
+
+
+async def get_strategies_for_context(limit: int = 5) -> list[dict]:
+    """Fetch most recent strategies to use as RAG context for Claude."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT title, body, category FROM strategies ORDER BY created_at DESC LIMIT $1",
+        limit,
+    )
+    return [dict(r) for r in rows]

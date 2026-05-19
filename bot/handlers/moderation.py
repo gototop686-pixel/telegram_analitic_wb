@@ -23,6 +23,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
                 [KeyboardButton(text="📊 Статус"), KeyboardButton(text="▶️ Парсинг")],
                 [KeyboardButton(text="⚙️ Управление"), KeyboardButton(text="🤖 Обработать")],
                 [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="📄 Анализ оферты")],
+                [KeyboardButton(text="🔗 Анализ ссылки"), KeyboardButton(text="🧠 Стратегии")],
             ],
             resize_keyboard=True,
             persistent=True,
@@ -279,6 +280,27 @@ async def kb_offer(message: Message) -> None:
     )
 
 
+@router.message(F.text == "🔗 Анализ ссылки")
+async def kb_analyze_link(message: Message) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    await message.answer(
+        "Отправь ссылку (http://...) — я загружу страницу и проанализирую через Claude.\n\n"
+        "Или: /analyze @channelname — чтобы добавить TG-канал в мониторинг."
+    )
+
+
+@router.message(F.text == "🧠 Стратегии")
+async def kb_strategies(message: Message) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await message.answer("Только для администраторов.")
+        return
+    from bot.handlers.admin_menu import cmd_menu
+    await cmd_menu(message)
+
+
 @router.message(F.text == "🔍 Поиск")
 async def kb_search_prompt(message: Message) -> None:
     moderator_ids = await queries.get_moderator_ids()
@@ -512,6 +534,155 @@ async def handle_offer_text_cmd(message: Message) -> None:
     if message.from_user.id not in moderator_ids:
         return
     await message.answer("Отправь PDF-файл оферты WB — я его проанализирую.")
+
+
+@router.message(Command("analyze"))
+async def cmd_analyze(message: Message) -> None:
+    """Analyze a URL, Telegram channel, or forum link on demand."""
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    target = message.text.replace("/analyze", "").strip()
+    if not target:
+        await message.answer(
+            "Использование:\n"
+            "/analyze https://example.com — анализ ссылки\n"
+            "/analyze @channelname — добавить TG-канал в мониторинг\n\n"
+            "Или просто отправь ссылку в чат — я её обработаю автоматически."
+        )
+        return
+    if target.startswith("@") or (not target.startswith("http") and not target.startswith("/")):
+        identifier = target if target.startswith("@") else f"@{target}"
+        ok = await queries.add_source("telegram", "media", "ru", identifier)
+        if ok:
+            await message.answer(f"✅ Канал {identifier} добавлен в мониторинг.\nДанные появятся при следующем парсинге (▶️ Парсинг).")
+        else:
+            await message.answer(f"⚠️ Канал {identifier} уже есть в источниках.")
+        return
+    await _analyze_url(message, target)
+
+
+@router.message(F.text.startswith("http"))
+async def handle_url_message(message: Message) -> None:
+    """Auto-detect URL sent by moderator and analyze it."""
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    url = message.text.strip().split()[0]
+    await _analyze_url(message, url)
+
+
+async def _analyze_url(message: Message, url: str) -> None:
+    await message.answer(f"⏳ Загружаю и анализирую:\n<code>{url}</code>", parse_mode="HTML")
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                await message.answer(f"Ошибка загрузки: HTTP {resp.status_code}")
+                return
+            html = resp.text
+
+        # Simple text extraction
+        import re
+        text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()[:8000]
+
+        if len(text) < 100:
+            await message.answer("Не удалось извлечь текст со страницы.")
+            return
+
+        from bot.services.llm import classify_and_summarize, generate_post
+        classification = await classify_and_summarize(text)
+        label = classification.get("label", "")
+        confidence = classification.get("confidence", 0)
+        alert_tier = classification.get("alert_tier", 2)
+        tier_emoji = "🔴 КРИТИЧНО" if alert_tier == 1 else "🟡 Дайджест"
+
+        result_text = (
+            f"{tier_emoji} <b>{label}</b> ({confidence:.0%})\n\n"
+            f"<b>Резюме:</b> {classification.get('summary_ru', '—')}\n\n"
+            f"<b>Сущности:</b> {', '.join(classification.get('entities', []))}"
+        )
+        await message.answer(result_text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✍️ Создать черновик поста", callback_data=f"url_post:{hash(url) % 10**8}"),
+                InlineKeyboardButton(text="💾 Сохранить в Obsidian", callback_data=f"url_obs:{hash(url) % 10**8}"),
+            ]]))
+
+        # Store result for follow-up callbacks
+        import bot.handlers.moderation as _self
+        if not hasattr(_self, "_url_cache"):
+            _self._url_cache = {}
+        _self._url_cache[hash(url) % 10**8] = {
+            "url": url, "text": text, "classification": classification
+        }
+
+    except Exception as e:
+        await message.answer(f"Ошибка анализа: {e}")
+
+
+@router.callback_query(F.data.startswith("url_post:"))
+async def handle_url_post(callback: CallbackQuery) -> None:
+    import bot.handlers.moderation as _self
+    cache = getattr(_self, "_url_cache", {})
+    key = int(callback.data.split(":")[1])
+    data = cache.get(key)
+    if not data:
+        await callback.answer("Данные устарели. Отправь ссылку ещё раз.", show_alert=True)
+        return
+    await callback.answer("Генерирую пост...")
+    await callback.message.answer("⏳ Создаю черновик поста...")
+    try:
+        from bot.services.llm import generate_post
+        from bot.services.publisher import send_draft_to_moderators
+        classification = data["classification"]
+        strategies = await queries.get_strategies_for_context(limit=5)
+        post = await generate_post(
+            label=classification.get("label", ""),
+            summary_ru=classification.get("summary_ru", ""),
+            entities=classification.get("entities", []),
+            confidence_band="single_weak",
+            strategies=strategies,
+        )
+        draft_id = await queries.create_draft(post.get("body_ru", ""), post.get("body_hy", ""))
+        await send_draft_to_moderators(
+            draft_id=draft_id, body_ru=post.get("body_ru", ""),
+            body_hy=post.get("body_hy", ""), bot=callback.bot,
+            tier_label="🔗 Ссылка", source_info=data["url"][:80],
+            label=classification.get("label", ""),
+            confidence=classification.get("confidence", 0),
+        )
+        await callback.message.answer(f"✅ Черновик #{draft_id} создан и отправлен на модерацию.")
+    except Exception as e:
+        await callback.message.answer(f"Ошибка: {e}")
+
+
+@router.callback_query(F.data.startswith("url_obs:"))
+async def handle_url_obsidian(callback: CallbackQuery) -> None:
+    import bot.handlers.moderation as _self
+    cache = getattr(_self, "_url_cache", {})
+    key = int(callback.data.split(":")[1])
+    data = cache.get(key)
+    if not data:
+        await callback.answer("Данные устарели.", show_alert=True)
+        return
+    try:
+        from bot.services.obsidian import save_raw_to_obsidian
+        import hashlib
+        await save_raw_to_obsidian(
+            source_type="url",
+            source_url=data["url"],
+            title=data["url"][:80],
+            body=data["text"],
+            classification=data["classification"],
+            event_id=abs(hash(data["url"])) % 10**6,
+        )
+        await callback.answer("✅ Сохранено в Obsidian!", show_alert=True)
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
 
 
 

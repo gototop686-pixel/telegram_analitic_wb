@@ -80,6 +80,28 @@ status: raw
     )
 
 
+async def save_strategy_to_obsidian(
+    title: str,
+    body: str,
+    category: str,
+    strategy_id: int = 0,
+) -> bool:
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    safe_title = title[:60].replace("/", "-").replace(":", "-").replace('"', "")
+    filename = f"Стратегии/{category}/{safe_title}.md"
+    content = f"""---
+date: {date_str}
+strategy_id: {strategy_id}
+category: {category}
+---
+
+# {title}
+
+{body}
+"""
+    return await _github_put(filename, content, f"🧠 [Стратегия] {safe_title}")
+
+
 async def save_to_obsidian(
     title: str,
     body_ru: str,

@@ -17,7 +17,9 @@ class AdminFSM(StatesGroup):
     waiting_publish_channel_locale = State()
     waiting_prompt_key = State()
     waiting_prompt_value = State()
-    waiting_keyword_add = State()  # data: kw_type = 'core' | 'context'
+    waiting_keyword_add = State()       # data: kw_type = 'core' | 'context'
+    waiting_strategy_title = State()
+    waiting_strategy_body = State()     # data: strategy_title, strategy_category
 
 
 # ── Main menu ──────────────────────────────────────────────────────────────
@@ -35,6 +37,9 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="🔑 Ключевые слова", callback_data="menu:keywords"),
             InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
+        ],
+        [
+            InlineKeyboardButton(text="🧠 Стратегии GoToTop", callback_data="menu:strategies"),
         ],
     ])
 
@@ -529,6 +534,202 @@ async def kw_add_save(message: Message, state: FSMContext) -> None:
             f"⚠️ Все слова уже есть в списке {label}.",
             reply_markup=main_menu_kb(),
         )
+
+
+# ── Strategies ─────────────────────────────────────────────────────────────
+
+STRATEGY_CATEGORIES = {
+    "sales": "💰 Продажи",
+    "seo": "🔍 SEO и карточки",
+    "competitor": "🕵️ Конкуренты",
+    "promotion": "📣 Продвижение",
+    "general": "📌 Общее",
+}
+
+
+def strategies_menu_kb() -> InlineKeyboardMarkup:
+    buttons = []
+    for cat, label in STRATEGY_CATEGORIES.items():
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"str:list:{cat}")])
+    buttons.append([InlineKeyboardButton(text="📋 Все стратегии", callback_data="str:list:all")])
+    buttons.append([InlineKeyboardButton(text="➕ Добавить стратегию", callback_data="str:add")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.callback_query(F.data == "menu:strategies")
+async def menu_strategies(callback: CallbackQuery) -> None:
+    strategies = await queries.get_strategies(limit=100)
+    total = len(strategies)
+    await callback.message.edit_text(
+        "<b>🧠 Стратегии GoToTop</b>\n\n"
+        "Здесь хранятся стратегии компании — по продажам, SEO, конкурентам, продвижению.\n"
+        "Claude использует их как контекст при создании каждого поста.\n"
+        "Все стратегии также сохраняются в Obsidian.\n\n"
+        f"Всего стратегий: <b>{total}</b>\n\n"
+        "Выбери категорию:",
+        parse_mode="HTML",
+        reply_markup=strategies_menu_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("str:list:"))
+async def str_list(callback: CallbackQuery) -> None:
+    category = callback.data.split(":")[2]
+    strategies = await queries.get_strategies(
+        category=None if category == "all" else category, limit=20
+    )
+    cat_label = STRATEGY_CATEGORIES.get(category, "Все")
+
+    if not strategies:
+        await callback.answer(f"В категории «{cat_label}» нет стратегий.", show_alert=True)
+        return
+
+    buttons = []
+    for s in strategies:
+        cat_icon = STRATEGY_CATEGORIES.get(s["category"], "📌").split()[0]
+        buttons.append([InlineKeyboardButton(
+            text=f"{cat_icon} {s['title'][:40]}",
+            callback_data=f"str:view:{s['id']}",
+        )])
+    buttons.append([InlineKeyboardButton(text="➕ Добавить", callback_data="str:add")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:strategies")])
+
+    await callback.message.edit_text(
+        f"<b>🧠 Стратегии — {cat_label} ({len(strategies)})</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("str:view:"))
+async def str_view(callback: CallbackQuery) -> None:
+    strategy_id = int(callback.data.split(":")[2])
+    s = await queries.get_strategy(strategy_id)
+    if not s:
+        await callback.answer("Стратегия не найдена.", show_alert=True)
+        return
+    cat_label = STRATEGY_CATEGORIES.get(s["category"], s["category"])
+    date_str = str(s["created_at"])[:10]
+    await callback.message.edit_text(
+        f"<b>{s['title']}</b>\n"
+        f"<i>{cat_label} · {date_str}</i>\n\n"
+        f"{s['body']}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Удалить", callback_data=f"str:del:{strategy_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"str:list:{s['category']}")],
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("str:del:"))
+async def str_delete(callback: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    strategy_id = int(callback.data.split(":")[2])
+    await queries.delete_strategy(strategy_id)
+    await callback.answer("✅ Стратегия удалена.", show_alert=True)
+    await menu_strategies(callback)
+
+
+@router.callback_query(F.data == "str:add")
+async def str_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    await state.set_state(AdminFSM.waiting_strategy_title)
+    await callback.message.edit_text(
+        "<b>➕ Новая стратегия</b>\n\n"
+        "Выбери категорию:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=label, callback_data=f"str:cat:{cat}")]
+            for cat, label in STRATEGY_CATEGORIES.items()
+        ] + [[InlineKeyboardButton(text="◀️ Отмена", callback_data="menu:strategies")]]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("str:cat:"))
+async def str_choose_category(callback: CallbackQuery, state: FSMContext) -> None:
+    category = callback.data.split(":")[2]
+    await state.update_data(strategy_category=category)
+    await state.set_state(AdminFSM.waiting_strategy_title)
+    label = STRATEGY_CATEGORIES.get(category, category)
+    await callback.message.edit_text(
+        f"<b>➕ Стратегия — {label}</b>\n\n"
+        "Введи <b>название</b> стратегии (коротко, 3-7 слов):\n\n"
+        "Отправь /cancel для отмены.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminFSM.waiting_strategy_title)
+async def str_get_title(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
+    if message.text.strip() == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_menu_kb())
+        return
+    await state.update_data(strategy_title=message.text.strip())
+    await state.set_state(AdminFSM.waiting_strategy_body)
+    await message.answer(
+        f"📌 Название: <b>{message.text.strip()}</b>\n\n"
+        "Теперь введи текст стратегии.\n"
+        "Опиши подход, тактику, конкретные шаги — всё что нужно знать.\n\n"
+        "Отправь /cancel для отмены.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminFSM.waiting_strategy_body)
+async def str_get_body(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
+    if message.text.strip() == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_menu_kb())
+        return
+
+    data = await state.get_data()
+    title = data.get("strategy_title", "Без названия")
+    category = data.get("strategy_category", "general")
+    body = message.text.strip()
+
+    strategy_id = await queries.save_strategy(title, body, category, message.from_user.id)
+    await state.clear()
+
+    # Save to Obsidian
+    try:
+        from bot.services.obsidian import save_strategy_to_obsidian
+        await save_strategy_to_obsidian(
+            title=title, body=body, category=category,
+            strategy_id=strategy_id,
+        )
+    except Exception as e:
+        print(f"[obsidian] Strategy save failed: {e}")
+
+    cat_label = STRATEGY_CATEGORIES.get(category, category)
+    await message.answer(
+        f"✅ Стратегия сохранена!\n\n"
+        f"<b>{title}</b> [{cat_label}]\n\n"
+        "Claude будет использовать её при создании следующих постов.",
+        parse_mode="HTML",
+        reply_markup=main_menu_kb(),
+    )
 
 
 # ── Back to main ───────────────────────────────────────────────────────────

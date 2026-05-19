@@ -102,11 +102,14 @@ DRAFT_PROMPT = """Ты редактор аналитического Telegram-к
 Сущности: {entities}
 Уровень уверенности: {confidence_band}
 
+{strategies_block}
+
 Требования к посту:
 - Стиль: профессиональный, без воды
 - Длина: 150-250 слов
 - Структура: заголовок → суть → что это значит для продавца → вывод
 - HTML-форматирование для Telegram (<b>, <i>, допустимы эмодзи)
+- Если есть стратегии GoToTop выше — пост должен отражать нашу позицию и подход
 
 Ответь в формате JSON: {{"body_ru": "...", "body_hy": "..."}}
 Для body_hy переведи на армянский язык."""
@@ -205,13 +208,21 @@ async def analyze_offer(text: str) -> dict:
     return json.loads(raw)
 
 
-async def generate_post(label: str, summary_ru: str, entities: list, confidence_band: str) -> dict:
+async def generate_post(label: str, summary_ru: str, entities: list, confidence_band: str, strategies: list[dict] | None = None) -> dict:
     client = get_client()
+    if strategies:
+        lines = ["СТРАТЕГИИ КОМПАНИИ GOTOTOP (учитывай при написании поста):"]
+        for s in strategies:
+            lines.append(f"\n### {s['title']} [{s.get('category', '')}]\n{s['body'][:500]}")
+        strategies_block = "\n".join(lines)
+    else:
+        strategies_block = ""
     prompt = DRAFT_PROMPT.format(
         label=label,
         summary_ru=summary_ru,
         entities=", ".join(entities) if entities else "—",
         confidence_band=confidence_band,
+        strategies_block=strategies_block,
     )
     response = await client.messages.create(
         model="claude-sonnet-4-6",

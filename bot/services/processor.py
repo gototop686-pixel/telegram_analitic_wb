@@ -44,8 +44,9 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
     relevant_labels_str = await queries.get_setting("relevant_labels", "")
     relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else set()
 
-    # Load keywords from DB once per run
+    # Load keywords and strategies from DB once per run
     core_kw, context_kw = await _load_keywords()
+    strategies = await queries.get_strategies_for_context(limit=5)
 
     # Government RSS sources require at least 1 CORE keyword (strict mode)
     strict_filter = processing_tier == "weekly"
@@ -103,6 +104,7 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
                 summary_ru=classification.get("summary_ru", ""),
                 entities=classification.get("entities", []),
                 confidence_band=confidence_band,
+                strategies=strategies,
             )
 
             draft_id = await queries.create_draft(
