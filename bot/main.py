@@ -40,23 +40,18 @@ async def on_shutdown(bot: Bot) -> None:
 def build_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
-    # Ingest RSS + YouTube every 30 minutes
-    scheduler.add_job(
-        lambda: asyncio.create_task(run_all_ingestion()),
-        "interval", minutes=30, id="ingest",
-    )
+    async def _ingest():
+        await run_all_ingestion()
 
-    # Process new events with LLM every 15 minutes
-    scheduler.add_job(
-        lambda: asyncio.create_task(process_unprocessed_events(bot)),
-        "interval", minutes=15, id="process",
-    )
+    async def _process():
+        await process_unprocessed_events(bot)
 
-    # Daily digest at 09:00 Moscow time
-    scheduler.add_job(
-        lambda: asyncio.create_task(_send_daily_digest(bot)),
-        "cron", hour=9, minute=0, id="digest",
-    )
+    async def _digest():
+        await _send_daily_digest(bot)
+
+    scheduler.add_job(_ingest, "interval", minutes=30, id="ingest")
+    scheduler.add_job(_process, "interval", minutes=15, id="process")
+    scheduler.add_job(_digest, "cron", hour=9, minute=0, id="digest")
     return scheduler
 
 
