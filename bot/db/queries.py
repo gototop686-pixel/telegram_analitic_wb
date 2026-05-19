@@ -133,6 +133,29 @@ async def log_llm_cost(operation: str, input_tokens: int, output_tokens: int, mo
     )
 
 
+async def get_stored_offer(locale: str) -> dict | None:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM stored_offers WHERE locale=$1", locale)
+    return dict(row) if row else None
+
+
+async def save_stored_offer(locale: str, text_content: str, filename: str, uploaded_by: int, version: str = "") -> None:
+    pool = await get_pool()
+    await pool.execute(
+        """INSERT INTO stored_offers (locale, text_content, filename, uploaded_by, version, uploaded_at)
+           VALUES ($1,$2,$3,$4,$5,NOW())
+           ON CONFLICT (locale) DO UPDATE
+           SET text_content=$2, filename=$3, uploaded_by=$4, version=$5, uploaded_at=NOW()""",
+        locale, text_content, filename, uploaded_by, version,
+    )
+
+
+async def list_stored_offers() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch("SELECT locale, version, filename, uploaded_at FROM stored_offers ORDER BY locale")
+    return [dict(r) for r in rows]
+
+
 async def search_events(query: str, limit: int = 5) -> list[dict]:
     pool = await get_pool()
     rows = await pool.fetch(

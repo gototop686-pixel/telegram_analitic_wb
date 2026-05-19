@@ -112,6 +112,52 @@ DRAFT_PROMPT = """Ты редактор аналитического Telegram-к
 Для body_hy переведи на армянский язык."""
 
 
+COMPARE_PROMPT = """Ты юридический аналитик WB. Сравни СТАРУЮ и НОВУЮ версии оферты Wildberries.
+
+СТАРАЯ ВЕРСИЯ:
+{old_text}
+
+НОВАЯ ВЕРСИЯ:
+{new_text}
+
+Найди конкретные отличия и ответь в JSON:
+{{
+  "has_changes": true/false,
+  "added": ["новый пункт 1", "новый пункт 2"],
+  "removed": ["удалённый пункт 1"],
+  "changed": ["было: X → стало: Y"],
+  "critical_changes": ["изменение критичное для продавца"],
+  "numbers_changed": ["старая цифра → новая цифра"],
+  "summary_ru": "резюме изменений 3-4 предложения",
+  "summary_hy": "резюме на армянском",
+  "urgency": 1 или 2
+}}"""
+
+
+async def compare_offers(old_text: str, new_text: str) -> dict:
+    import json
+    client = get_client()
+    prompt = COMPARE_PROMPT.format(
+        old_text=old_text[:4000],
+        new_text=new_text[:4000],
+    )
+    response = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=3000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    await _log_cost("compare_offers", response, "claude-sonnet-4-6")
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    last_brace = raw.rfind("}")
+    if last_brace != -1:
+        raw = raw[:last_brace + 1]
+    return json.loads(raw)
+
+
 OFFER_PROMPT = """Ты юридический аналитик по маркетплейсу Wildberries. Тебе передан текст оферты/документа WB.
 
 Сделай детальный анализ:
