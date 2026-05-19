@@ -133,6 +133,18 @@ async def log_llm_cost(operation: str, input_tokens: int, output_tokens: int, mo
     )
 
 
+async def search_events(query: str, limit: int = 5) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT id, source_type, url, title, body, fetched_at
+           FROM raw_events
+           WHERE (title ILIKE $1 OR body ILIKE $1)
+           ORDER BY fetched_at DESC LIMIT $2""",
+        f"%{query}%", limit,
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_llm_cost_total() -> float:
     pool = await get_pool()
     val = await pool.fetchval("SELECT COALESCE(SUM(cost_usd), 0) FROM llm_cost_log")

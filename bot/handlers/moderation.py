@@ -3,11 +3,38 @@ import io
 import os
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+)
 from aiogram.filters import Command
 
 from bot.db import queries
 from bot.services.publisher import publish_draft
+
+
+async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    admin_ids = await queries.get_admin_ids()
+    is_admin = user_id in admin_ids
+    if is_admin:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📊 Статус"), KeyboardButton(text="▶️ Парсинг")],
+                [KeyboardButton(text="⚙️ Управление"), KeyboardButton(text="🤖 Обработать")],
+                [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="📄 Анализ оферты")],
+            ],
+            resize_keyboard=True,
+            persistent=True,
+        )
+    else:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📊 Статус"), KeyboardButton(text="📄 Анализ оферты")],
+                [KeyboardButton(text="🔍 Поиск")],
+            ],
+            resize_keyboard=True,
+            persistent=True,
+        )
 
 router = Router()
 
@@ -86,11 +113,20 @@ async def handle_reject(callback: CallbackQuery) -> None:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    await message.answer(
-        f"Бот аналитики WB запущен.\n\nВаш ID: <code>{message.from_user.id}</code>\n"
-        "Передайте этот ID администратору для получения доступа.",
-        parse_mode="HTML",
-    )
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id in moderator_ids:
+        kb = await get_main_keyboard(message.from_user.id)
+        await message.answer(
+            f"👋 GoToTop Analytics\n\nВаш ID: <code>{message.from_user.id}</code>",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+    else:
+        await message.answer(
+            f"Бот аналитики WB.\n\nВаш ID: <code>{message.from_user.id}</code>\n"
+            "Передайте этот ID администратору для получения доступа.",
+            parse_mode="HTML",
+        )
 
 
 @router.message(Command("status"))
@@ -151,7 +187,9 @@ async def cmd_ingest(message: Message) -> None:
                 f"✅ Парсинг завершён:\n"
                 f"• RSS: {results['rss']} новых\n"
                 f"• YouTube: {results['youtube']} новых\n"
-                f"• Google News: {results['google_news']} новых"
+                f"• Google News: {results['google_news']} новых\n"
+                f"• Форумы (VC.ru): {results.get('forums', 0)} новых\n"
+                f"• WB Release Notes: {results.get('wb_release', 0)} новых"
             )
         except Exception as e:
             await message.answer(f"Ошибка парсинга: {e}")
@@ -204,6 +242,71 @@ async def cmd_me(message: Message) -> None:
         f"Username: @{message.from_user.username}",
         parse_mode="HTML",
     )
+
+
+# ── Keyboard button handlers ───────────────────────────────────────────────
+
+@router.message(F.text == "📊 Статус")
+async def kb_status(message: Message) -> None:
+    await cmd_status(message)
+
+
+@router.message(F.text == "▶️ Парсинг")
+async def kb_ingest(message: Message) -> None:
+    await cmd_ingest(message)
+
+
+@router.message(F.text == "🤖 Обработать")
+async def kb_process(message: Message) -> None:
+    await cmd_process(message)
+
+
+@router.message(F.text == "⚙️ Управление")
+async def kb_menu(message: Message) -> None:
+    from bot.handlers.admin_menu import cmd_menu
+    await cmd_menu(message)
+
+
+@router.message(F.text == "📄 Анализ оферты")
+async def kb_offer(message: Message) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    await message.answer(
+        "Отправь PDF-файл или документ WB.\n"
+        "Я извлеку текст и сделаю анализ через Claude.",
+    )
+
+
+@router.message(F.text == "🔍 Поиск")
+async def kb_search_prompt(message: Message) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    await message.answer("Введи поисковый запрос:\n/search <запрос>\n\nПример: /search ФАС комиссия")
+
+
+@router.message(Command("search"))
+async def cmd_search(message: Message) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    query = message.text.replace("/search", "").strip()
+    if not query:
+        await message.answer("Укажи запрос: /search ФАС комиссия")
+        return
+    results = await queries.search_events(query, limit=5)
+    if not results:
+        await message.answer(f"По запросу «{query}» ничего не найдено.")
+        return
+    lines = [f"🔍 <b>Результаты по «{query}»:</b>\n"]
+    for r in results:
+        url = r.get("url", "")
+        title = r.get("title") or r.get("body", "")[:80]
+        date = str(r.get("fetched_at", ""))[:10]
+        link = f'<a href="{url}">{title}</a>' if url else title
+        lines.append(f"• {date} — {link}")
+    await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(F.document | F.text.startswith("/offer"))
