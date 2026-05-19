@@ -229,6 +229,33 @@ async def get_publish_records(draft_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_published_without_obsidian(limit: int = 50) -> list[dict]:
+    """Drafts that were published but never saved to Obsidian."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT ON (p.draft_id)
+            p.draft_id, p.market, p.locale, p.published_at,
+            d.body_ru, d.body_hy
+        FROM publishes p
+        JOIN drafts d ON d.id = p.draft_id
+        WHERE (p.obsidian_path IS NULL OR p.obsidian_path = '')
+        ORDER BY p.draft_id DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def mark_publish_obsidian_path(draft_id: int, path: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE publishes SET obsidian_path=$1 WHERE draft_id=$2 AND (obsidian_path IS NULL OR obsidian_path='')",
+        path, draft_id,
+    )
+
+
 async def save_strategy_proposal(
     draft_id: int, title: str, body: str, category: str, raw_event_id: int = None
 ) -> int:

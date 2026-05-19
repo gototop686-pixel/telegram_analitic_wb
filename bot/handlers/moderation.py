@@ -151,7 +151,12 @@ async def cmd_status(message: Message) -> None:
         f"🔗 Активных источников: <b>{stats['sources']}</b>"
         f"{strat_line}"
     )
-    await message.answer(text, parse_mode="HTML")
+    admin_ids = await queries.get_admin_ids()
+    is_admin = message.from_user.id in admin_ids
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📤 Sync в Obsidian", callback_data="obsidian:sync"),
+    ]]) if is_admin else None
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(Command("addmod"))
@@ -1137,6 +1142,53 @@ async def handle_channel_delete(callback: CallbackQuery) -> None:
         + (f" и Obsidian ({obsidian_path})" if obsidian_path else "") + ".",
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data == "obsidian:sync")
+async def handle_obsidian_sync(callback: CallbackQuery) -> None:
+    """Sync published posts that are missing from Obsidian."""
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    await callback.answer("Запускаю синхронизацию...")
+    await callback.message.answer("⏳ Синхронизирую опубликованные посты с Obsidian...")
+
+    async def _sync():
+        try:
+            from bot.services.obsidian import save_published_to_obsidian
+            records = await queries.get_published_without_obsidian(limit=50)
+            if not records:
+                await callback.message.answer("✅ Все опубликованные посты уже есть в Obsidian.")
+                return
+            synced = 0
+            for rec in records:
+                try:
+                    body_ru = rec.get("body_ru", "") or ""
+                    body_hy = rec.get("body_hy", "") or ""
+                    market = rec.get("market", "") or "unclear"
+                    draft_id = rec["draft_id"]
+                    path = await save_published_to_obsidian(
+                        draft_id=draft_id,
+                        body_ru=body_ru,
+                        body_hy=body_hy,
+                        label="Синхронизация",
+                        market=market,
+                    )
+                    await queries.mark_publish_obsidian_path(draft_id, path)
+                    synced += 1
+                except Exception as e:
+                    print(f"[sync] draft {rec.get('draft_id')}: {e}")
+            await callback.message.answer(
+                f"✅ <b>Синхронизация завершена</b>\n\n"
+                f"📤 Загружено в Obsidian: <b>{synced}</b> постов\n"
+                f"📁 Папки: WB_Россия / WB_Армения / WB_ЕАЭС",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await callback.message.answer(f"Ошибка синхронизации: {e}")
+
+    asyncio.create_task(_sync())
 
 
 @router.callback_query(F.data.startswith("strat_ok:"))
