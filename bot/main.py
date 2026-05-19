@@ -122,10 +122,21 @@ def main() -> None:
     async def _startup(_app):
         await on_startup(bot)
         scheduler.start()
+        asyncio.create_task(_start_telethon())
 
     async def _shutdown(_app):
         scheduler.shutdown(wait=False)
+        from bot.services.telethon_monitor import stop_monitoring
+        await stop_monitoring()
         await on_shutdown(bot)
+
+
+async def _start_telethon():
+    try:
+        from bot.services.telethon_monitor import start_monitoring
+        await start_monitoring()
+    except Exception as e:
+        print(f"[telethon] Error: {e}")
 
     app.on_startup.append(_startup)
     app.on_cleanup.append(_shutdown)

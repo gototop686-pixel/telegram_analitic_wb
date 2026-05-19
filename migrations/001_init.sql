@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS source_registry (
 -- Raw incoming events (never mutated after insert)
 CREATE TABLE IF NOT EXISTS raw_events (
     id           SERIAL PRIMARY KEY,
-    source_id    INT REFERENCES source_registry(id),
+    source_id    INT REFERENCES source_registry(id) ON DELETE SET NULL,
     source_type  TEXT NOT NULL,
     external_id  TEXT,                 -- message_id, video_id, etc.
     url          TEXT,
