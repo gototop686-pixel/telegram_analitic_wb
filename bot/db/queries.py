@@ -211,6 +211,59 @@ async def log_publish(draft_id: int, channel_id: int, locale: str, tg_message_id
     )
 
 
+async def log_publish_extended(
+    draft_id: int, channel_id: int, locale: str,
+    tg_message_id: int, market: str = "", obsidian_path: str = "",
+) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        """INSERT INTO publishes (draft_id, channel_id, locale, tg_message_id, market, obsidian_path)
+           VALUES ($1,$2,$3,$4,$5,$6)""",
+        draft_id, channel_id, locale, tg_message_id, market, obsidian_path,
+    )
+
+
+async def get_publish_records(draft_id: int) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch("SELECT * FROM publishes WHERE draft_id=$1", draft_id)
+    return [dict(r) for r in rows]
+
+
+async def save_strategy_proposal(
+    draft_id: int, title: str, body: str, category: str, raw_event_id: int = None
+) -> int:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """INSERT INTO strategy_proposals (draft_id, raw_event_id, title, body, category)
+           VALUES ($1,$2,$3,$4,$5) RETURNING id""",
+        draft_id, raw_event_id, title, body, category,
+    )
+    return row["id"]
+
+
+async def get_pending_strategy_proposals(limit: int = 10) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM strategy_proposals WHERE status='pending' ORDER BY created_at DESC LIMIT $1",
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def approve_strategy_proposal(proposal_id: int) -> dict | None:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "UPDATE strategy_proposals SET status='approved' WHERE id=$1 RETURNING *",
+        proposal_id,
+    )
+    return dict(row) if row else None
+
+
+async def reject_strategy_proposal(proposal_id: int) -> None:
+    pool = await get_pool()
+    await pool.execute("UPDATE strategy_proposals SET status='rejected' WHERE id=$1", proposal_id)
+
+
 async def get_moderator_ids() -> list[int]:
     pool = await get_pool()
     rows = await pool.fetch(
@@ -368,12 +421,19 @@ async def get_bot_stats() -> dict:
     drafts_pending = await pool.fetchval("SELECT COUNT(*) FROM drafts WHERE status='pending'")
     published = await pool.fetchval("SELECT COUNT(*) FROM publishes")
     sources = await pool.fetchval("SELECT COUNT(*) FROM source_registry WHERE active=TRUE")
+    try:
+        strategy_proposals = await pool.fetchval(
+            "SELECT COUNT(*) FROM strategy_proposals WHERE status='pending'"
+        )
+    except Exception:
+        strategy_proposals = 0
     return {
         "raw_total": raw_count,
         "unprocessed": unprocessed,
         "drafts_pending": drafts_pending,
         "published": published,
         "sources": sources,
+        "strategy_proposals": strategy_proposals,
     }
 
 

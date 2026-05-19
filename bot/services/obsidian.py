@@ -7,6 +7,24 @@ GITHUB_TOKEN = os.environ.get("OBSIDIAN_GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("OBSIDIAN_GITHUB_REPO", "")  # e.g. "gototop686/wb-notes"
 
 
+def _obsidian_folder(market: str, label: str) -> str:
+    """Determine Obsidian folder based on market and label."""
+    marketplace_labels = {
+        "Маркетплейс_политика_WB", "Изменение_оферты", "Коммуникации_WB",
+        "Комиссии_логистика", "Антимонопольное_ФАС",
+    }
+    is_marketplace = label in marketplace_labels
+
+    if market == "RU":
+        return "WB_Россия" if is_marketplace else "Новости_Россия"
+    elif market == "HY":
+        return "WB_Армения" if is_marketplace else "Новости_Армения"
+    elif market == "both":
+        return "WB_ЕАЭС"
+    else:
+        return "На_проверке"
+
+
 async def _github_put(filename: str, content: str, commit_msg: str) -> bool:
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return False
@@ -78,6 +96,75 @@ status: raw
         content,
         f"📥 RAW [{label}] {safe_title}",
     )
+
+
+async def delete_from_obsidian(path: str) -> bool:
+    """Delete a file from GitHub repo (Obsidian)."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False
+    async with httpx.AsyncClient(timeout=15) as client:
+        # First GET to obtain the file SHA
+        get_resp = await client.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}",
+            headers={
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+        )
+        if get_resp.status_code != 200:
+            print(f"[obsidian] File not found for delete: {path}")
+            return False
+        sha = get_resp.json().get("sha", "")
+        del_resp = await client.delete(
+            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}",
+            headers={
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            json={"message": f"🗑 Удалено: {path}", "sha": sha},
+        )
+    return del_resp.status_code in (200, 204)
+
+
+async def save_published_to_obsidian(
+    draft_id: int,
+    body_ru: str,
+    body_hy: str,
+    label: str,
+    market: str,
+    source_url: str = "",
+    summary_ru: str = "",
+) -> str:
+    """Save published post to Obsidian in correct market folder. Returns file path."""
+    import re
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    folder = _obsidian_folder(market, label)
+    safe_title = re.sub(r'<[^>]+>', '', body_ru[:50]).replace("/", "-").replace(":", "-").strip()
+    filename = f"{folder}/{date_str}/draft_{draft_id}_{safe_title}.md"
+
+    market_labels = {"RU": "🇷🇺 Россия", "HY": "🇦🇲 Армения", "both": "🇷🇺🇦🇲 Оба рынка", "unclear": "❓ Уточняется"}
+    content = f"""---
+date: {date_str}
+draft_id: {draft_id}
+label: {label}
+market: {market}
+source: {source_url or "—"}
+status: published
+---
+
+> {market_labels.get(market, market)} · {label}
+
+## Пост RU
+{body_ru}
+
+## Пост HY
+{body_hy or "—"}
+
+## Резюме
+{summary_ru}
+"""
+    await _github_put(filename, content, f"📢 [{label}] draft_{draft_id}")
+    return filename
 
 
 async def save_strategy_to_obsidian(

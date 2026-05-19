@@ -140,6 +140,8 @@ async def cmd_status(message: Message) -> None:
         return
 
     stats = await queries.get_bot_stats()
+    strategy_proposals = stats.get("strategy_proposals", 0)
+    strat_line = f"\n💡 Стратегий на одобрение: <b>{strategy_proposals}</b>" if strategy_proposals else ""
     text = (
         "<b>📊 Статус бота</b>\n\n"
         f"📥 Всего событий в БД: <b>{stats['raw_total']}</b>\n"
@@ -147,6 +149,7 @@ async def cmd_status(message: Message) -> None:
         f"📝 Черновиков на проверке: <b>{stats['drafts_pending']}</b>\n"
         f"📢 Опубликовано постов: <b>{stats['published']}</b>\n"
         f"🔗 Активных источников: <b>{stats['sources']}</b>"
+        f"{strat_line}"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -943,6 +946,111 @@ async def handle_url_obsidian(callback: CallbackQuery) -> None:
         await callback.answer(f"Ошибка: {e}", show_alert=True)
 
 
+
+
+@router.callback_query(F.data.startswith("ch_del:"))
+async def handle_channel_delete(callback: CallbackQuery) -> None:
+    """Delete post from all Telegram channels + Obsidian, mark draft rejected."""
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+
+    draft_id = int(callback.data.split(":")[1])
+    await callback.answer("Удаляю...")
+
+    publish_records = await queries.get_publish_records(draft_id)
+    deleted_tg = 0
+    obsidian_path = ""
+
+    for rec in publish_records:
+        channel_id = rec.get("channel_id")
+        tg_message_id = rec.get("tg_message_id")
+        if not obsidian_path:
+            obsidian_path = rec.get("obsidian_path", "")
+        if channel_id and tg_message_id:
+            try:
+                await callback.bot.delete_message(channel_id, tg_message_id)
+                deleted_tg += 1
+            except Exception as e:
+                print(f"[ch_del] Cannot delete TG msg {tg_message_id} in {channel_id}: {e}")
+
+    if obsidian_path:
+        try:
+            from bot.services.obsidian import delete_from_obsidian
+            await delete_from_obsidian(obsidian_path)
+        except Exception as e:
+            print(f"[ch_del] Obsidian delete failed: {e}")
+
+    await queries.reject_draft(draft_id)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(
+        f"🗑 Черновик #{draft_id} удалён из {deleted_tg} каналов"
+        + (f" и Obsidian ({obsidian_path})" if obsidian_path else "") + ".",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("strat_ok:"))
+async def handle_strategy_approve(callback: CallbackQuery) -> None:
+    """Approve strategy proposal → save to strategies table + Obsidian."""
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+
+    proposal_id = int(callback.data.split(":")[1])
+    proposal = await queries.approve_strategy_proposal(proposal_id)
+    if not proposal:
+        await callback.answer("Предложение не найдено.", show_alert=True)
+        return
+
+    # Insert into strategies table so it becomes available as RAG context
+    strategy_id = await queries.save_strategy(
+        title=proposal["title"],
+        body=proposal["body"],
+        category=proposal.get("category", "general"),
+        created_by=callback.from_user.id,
+    )
+
+    # Save approved strategy to Obsidian
+    try:
+        from bot.services.obsidian import save_strategy_to_obsidian
+        await save_strategy_to_obsidian(
+            title=proposal["title"],
+            body=proposal["body"],
+            category=proposal.get("category", "general"),
+            strategy_id=strategy_id,
+        )
+    except Exception as e:
+        print(f"[strat_ok] Obsidian save failed: {e}")
+
+    await callback.message.edit_text(
+        callback.message.text + "\n\n✅ Стратегия добавлена в базу!",
+        reply_markup=None,
+    )
+    await callback.answer("Стратегия одобрена!")
+
+
+@router.callback_query(F.data.startswith("strat_no:"))
+async def handle_strategy_reject(callback: CallbackQuery) -> None:
+    """Reject strategy proposal."""
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+
+    proposal_id = int(callback.data.split(":")[1])
+    await queries.reject_strategy_proposal(proposal_id)
+    await callback.message.edit_text(
+        callback.message.text + "\n\n❌ Отклонено.",
+        reply_markup=None,
+    )
+    await callback.answer("Отклонено.")
 
 
 @router.callback_query(F.data == "offer_skip")
