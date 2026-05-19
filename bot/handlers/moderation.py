@@ -343,11 +343,15 @@ async def kb_process(message: Message) -> None:
         )])
     lines.append("\n<i>Совет: сначала очисти фильтром — это бесплатно и быстро.</i>")
     buttons.insert(0, [InlineKeyboardButton(
-        text=f"🧹 Очистить нерелевантное (бесплатно)",
+        text="🗑 Архивировать старше 7 дней",
+        callback_data="process:archive",
+    )])
+    buttons.insert(1, [InlineKeyboardButton(
+        text="🧹 Очистить нерелевантное (бесплатно)",
         callback_data="process:filter",
     )])
     buttons.append([InlineKeyboardButton(
-        text=f"🌐 Обработать всё (до 30 событий)",
+        text="🌐 Обработать всё (до 30 событий)",
         callback_data="process:type:all",
     )])
     await message.answer(
@@ -363,6 +367,23 @@ async def handle_process_choice(callback: CallbackQuery) -> None:
         await callback.answer("Нет доступа.", show_alert=True)
         return
     action = callback.data.split(":")[2] if len(callback.data.split(":")) > 2 else ""
+
+    if callback.data == "process:archive":
+        await callback.message.edit_text("🗑 Архивирую события старше 7 дней...")
+        await callback.answer()
+        async def _archive():
+            try:
+                count = await queries.archive_old_events(days=7)
+                await callback.message.answer(
+                    f"🗑 <b>Архивировано старых событий: {count}</b>\n\n"
+                    "Они помечены как обработанные и больше не попадут в очередь.\n"
+                    "Нажми <b>🤖 Обработать</b> чтобы увидеть актуальную очередь.",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                await callback.message.answer(f"Ошибка: {e}")
+        asyncio.create_task(_archive())
+        return
 
     if callback.data == "process:filter":
         await callback.message.edit_text("🧹 Запускаю бесплатный фильтр по ключевым словам...")
@@ -431,6 +452,11 @@ async def kb_drafts(message: Message) -> None:
     await show_pending_drafts(message)
 
 
+def _strip_html(text: str) -> str:
+    import re
+    return re.sub(r'<[^>]+>', '', text or '')
+
+
 async def show_pending_drafts(message: Message) -> None:
     drafts = await queries.get_pending_drafts(limit=10)
     if not drafts:
@@ -438,13 +464,14 @@ async def show_pending_drafts(message: Message) -> None:
         return
     await message.answer(f"📝 <b>Черновики на проверке: {len(drafts)}</b>", parse_mode="HTML")
     for draft in drafts:
-        body_ru = draft.get("body_ru", "")
-        body_hy = draft.get("body_hy", "")
+        # Strip HTML before slicing to avoid broken tags
+        body_ru = _strip_html(draft.get("body_ru", ""))
+        body_hy = _strip_html(draft.get("body_hy", ""))
         created = str(draft.get("created_at", ""))[:16]
         preview = (
             f"📋 <b>Черновик #{draft['id']}</b> · {created}\n\n"
-            f"🇷🇺 <b>RU:</b>\n{body_ru[:600]}\n\n"
-            f"🇦🇲 <b>HY:</b>\n{body_hy[:300] if body_hy else '—'}"
+            f"🇷🇺 RU:\n{body_ru[:600]}\n\n"
+            f"🇦🇲 HY:\n{body_hy[:300] if body_hy else '—'}"
         )
         await message.answer(preview, parse_mode="HTML", reply_markup=draft_keyboard(draft["id"]))
 

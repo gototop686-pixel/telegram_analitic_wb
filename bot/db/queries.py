@@ -129,6 +129,22 @@ async def get_pending_drafts(limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def archive_old_events(days: int = 7) -> int:
+    """Mark events older than N days as processed without Claude (send to Obsidian archive)."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """UPDATE raw_events SET processed_at = NOW()
+           WHERE processed_at IS NULL
+           AND fetched_at < NOW() - ($1 || ' days')::INTERVAL""",
+        str(days),
+    )
+    # result is like "UPDATE 42"
+    try:
+        return int(result.split()[-1])
+    except Exception:
+        return 0
+
+
 async def get_unprocessed_by_type() -> list[dict]:
     pool = await get_pool()
     rows = await pool.fetch(
