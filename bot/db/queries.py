@@ -120,6 +120,15 @@ async def get_draft(draft_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_pending_drafts(limit: int = 10) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM drafts WHERE status='pending' ORDER BY created_at DESC LIMIT $1",
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
 async def approve_draft(draft_id: int, approved_by: int) -> None:
     pool = await get_pool()
     await pool.execute(

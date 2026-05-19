@@ -22,8 +22,9 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
             keyboard=[
                 [KeyboardButton(text="📊 Статус"), KeyboardButton(text="▶️ Парсинг")],
                 [KeyboardButton(text="⚙️ Управление"), KeyboardButton(text="🤖 Обработать")],
-                [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="📄 Анализ оферты")],
+                [KeyboardButton(text="📝 Черновики"), KeyboardButton(text="📄 Анализ оферты")],
                 [KeyboardButton(text="🔗 Анализ ссылки"), KeyboardButton(text="🧠 Стратегии")],
+                [KeyboardButton(text="🔍 Поиск")],
             ],
             resize_keyboard=True,
             persistent=True,
@@ -31,8 +32,8 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     else:
         return ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="📊 Статус"), KeyboardButton(text="📄 Анализ оферты")],
-                [KeyboardButton(text="🔍 Поиск")],
+                [KeyboardButton(text="📊 Статус"), KeyboardButton(text="📝 Черновики")],
+                [KeyboardButton(text="📄 Анализ оферты"), KeyboardButton(text="🔍 Поиск")],
             ],
             resize_keyboard=True,
             persistent=True,
@@ -278,6 +279,32 @@ async def kb_offer(message: Message) -> None:
         "Отправь PDF-файл или документ WB.\n"
         "Я извлеку текст и сделаю анализ через Claude.",
     )
+
+
+@router.message(F.text == "📝 Черновики")
+async def kb_drafts(message: Message) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        return
+    await show_pending_drafts(message)
+
+
+async def show_pending_drafts(message: Message) -> None:
+    drafts = await queries.get_pending_drafts(limit=10)
+    if not drafts:
+        await message.answer("✅ Нет черновиков на проверке.")
+        return
+    await message.answer(f"📝 <b>Черновики на проверке: {len(drafts)}</b>", parse_mode="HTML")
+    for draft in drafts:
+        body_ru = draft.get("body_ru", "")
+        body_hy = draft.get("body_hy", "")
+        created = str(draft.get("created_at", ""))[:16]
+        preview = (
+            f"📋 <b>Черновик #{draft['id']}</b> · {created}\n\n"
+            f"🇷🇺 <b>RU:</b>\n{body_ru[:600]}\n\n"
+            f"🇦🇲 <b>HY:</b>\n{body_hy[:300] if body_hy else '—'}"
+        )
+        await message.answer(preview, parse_mode="HTML", reply_markup=draft_keyboard(draft["id"]))
 
 
 @router.message(F.text == "🔗 Анализ ссылки")

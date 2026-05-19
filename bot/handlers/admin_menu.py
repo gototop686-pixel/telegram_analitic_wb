@@ -15,6 +15,7 @@ class AdminFSM(StatesGroup):
     waiting_rss_url = State()
     waiting_publish_channel_id = State()
     waiting_publish_channel_locale = State()
+    waiting_drafts_chat_id = State()
     waiting_prompt_key = State()
     waiting_prompt_value = State()
     waiting_keyword_add = State()       # data: kw_type = 'core' | 'context'
@@ -216,8 +217,9 @@ async def fsm_add_rss(message: Message, state: FSMContext) -> None:
 
 def channels_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Список каналов", callback_data="ch:list")],
-        [InlineKeyboardButton(text="➕ Добавить канал", callback_data="ch:add")],
+        [InlineKeyboardButton(text="📋 Список каналов публикации", callback_data="ch:list")],
+        [InlineKeyboardButton(text="➕ Добавить канал публикации", callback_data="ch:add")],
+        [InlineKeyboardButton(text="📝 Чат черновиков", callback_data="ch:drafts_chat")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main")],
     ])
 
@@ -260,6 +262,56 @@ async def ch_delete(callback: CallbackQuery) -> None:
     await queries.remove_publish_channel(channel_id)
     await callback.answer("✅ Канал удалён.", show_alert=True)
     await ch_list(callback)
+
+
+@router.callback_query(F.data == "ch:drafts_chat")
+async def ch_drafts_chat(callback: CallbackQuery, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if callback.from_user.id not in admin_ids:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    current = await queries.get_setting("drafts_chat_id", "")
+    current_text = f"Текущий чат: <code>{current}</code>" if current else "Чат черновиков не настроен."
+    await state.set_state(AdminFSM.waiting_drafts_chat_id)
+    await callback.message.edit_text(
+        f"<b>📝 Чат для черновиков</b>\n\n"
+        f"{current_text}\n\n"
+        "Создай приватную группу в Telegram, добавь туда бота администратором.\n"
+        "Затем отправь любое сообщение в группу, перешли его боту — бот получит ID.\n\n"
+        "Или введи ID группы вручную (отрицательное число, например: <code>-1001234567890</code>)\n\n"
+        "Отправь /cancel для отмены.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminFSM.waiting_drafts_chat_id)
+async def fsm_set_drafts_chat(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
+    if message.text.strip() == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_menu_kb())
+        return
+    # Accept forwarded message (extract chat id) or direct number
+    if message.forward_from_chat:
+        chat_id = message.forward_from_chat.id
+    else:
+        try:
+            chat_id = int(message.text.strip())
+        except ValueError:
+            await message.answer("Неверный формат. Введи число, например: -1001234567890")
+            return
+    await queries.set_setting("drafts_chat_id", str(chat_id))
+    await state.clear()
+    await message.answer(
+        f"✅ Чат черновиков установлен: <code>{chat_id}</code>\n\n"
+        "Теперь все новые черновики будут приходить туда с кнопками одобрения.",
+        parse_mode="HTML",
+        reply_markup=main_menu_kb(),
+    )
 
 
 @router.callback_query(F.data == "ch:add")
