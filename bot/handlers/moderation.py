@@ -466,9 +466,30 @@ async def kb_offer(message: Message) -> None:
     moderator_ids = await queries.get_moderator_ids()
     if message.from_user.id not in moderator_ids:
         return
+    offers = await queries.list_stored_offers()
+    locale_names = {"ru": "🇷🇺 Россия", "hy": "🇦🇲 Армения", "kz": "🇰🇿 Казахстан"}
+    lines = ["<b>📄 Оферты Wildberries</b>\n"]
+    if offers:
+        for o in offers:
+            locale_label = locale_names.get(o["locale"], o["locale"].upper())
+            date = str(o.get("uploaded_at", ""))[:10]
+            lines.append(f"{locale_label}: <b>{o['filename']}</b> ({date})")
+    else:
+        lines.append("⚠️ Оферты ещё не загружены.")
+    lines.append("\nЧтобы загрузить или обновить оферту — нажми кнопку и отправь PDF.")
     await message.answer(
-        "Отправь PDF-файл или документ WB.\n"
-        "Я извлеку текст и сделаю анализ через Claude.",
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇷🇺 Загрузить RU оферту", callback_data="offer_upload:ru"),
+                InlineKeyboardButton(text="🇦🇲 Загрузить HY оферту", callback_data="offer_upload:hy"),
+            ],
+            [
+                InlineKeyboardButton(text="🔄 Сравнить RU версии", callback_data="offer_compare:ru"),
+                InlineKeyboardButton(text="🔄 Сравнить HY версии", callback_data="offer_compare:hy"),
+            ],
+        ]),
     )
 
 
@@ -622,7 +643,55 @@ from aiogram.fsm.context import FSMContext
 
 
 class OfferFSM(StatesGroup):
-    waiting_locale = State()
+    waiting_pdf = State()
+
+
+@router.callback_query(F.data.startswith("offer_upload:"))
+async def handle_offer_upload_btn(callback: CallbackQuery, state: FSMContext) -> None:
+    locale = callback.data.split(":")[1]
+    locale_name = {"ru": "🇷🇺 Россия", "hy": "🇦🇲 Армения", "kz": "🇰🇿 Казахстан"}.get(locale, locale.upper())
+    await state.update_data(offer_locale=locale)
+    await state.set_state(OfferFSM.waiting_pdf)
+    await callback.message.answer(
+        f"Отправь PDF-файл оферты WB · {locale_name}\n\n"
+        "Старая версия будет заменена автоматически.",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("offer_compare:"))
+async def handle_offer_compare_btn(callback: CallbackQuery) -> None:
+    locale = callback.data.split(":")[1]
+    locale_name = {"ru": "🇷🇺 Россия", "hy": "🇦🇲 Армения"}.get(locale, locale.upper())
+    existing = await queries.get_stored_offer(locale)
+    if not existing:
+        await callback.answer(f"Оферта {locale_name} ещё не загружена.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        f"Отправь новую версию оферты {locale_name} для сравнения.\n"
+        "Старая при этом НЕ заменится — только сравним.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="offer_compare_cancel"),
+        ]]),
+    )
+    await callback.message.answer(
+        f"<i>Текущая версия: {existing['filename']} ({str(existing.get('uploaded_at',''))[:10]})</i>",
+        parse_mode="HTML",
+    )
+    import bot.handlers.moderation as _self
+    if not hasattr(_self, "_offer_compare_pending"):
+        _self._offer_compare_pending = {}
+    _self._offer_compare_pending[callback.from_user.id] = locale
+
+
+@router.callback_query(F.data == "offer_compare_cancel")
+async def handle_offer_compare_cancel(callback: CallbackQuery) -> None:
+    import bot.handlers.moderation as _self
+    if hasattr(_self, "_offer_compare_pending"):
+        _self._offer_compare_pending.pop(callback.from_user.id, None)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Отменено.")
 
 
 @router.message(F.document)
@@ -630,133 +699,151 @@ async def handle_document(message: Message, state: FSMContext) -> None:
     moderator_ids = await queries.get_moderator_ids()
     if message.from_user.id not in moderator_ids:
         return
+
+    # Check if user is in compare mode (no FSM state, but compare pending)
+    import bot.handlers.moderation as _self
+    compare_locale = getattr(_self, "_offer_compare_pending", {}).get(message.from_user.id)
+    if compare_locale:
+        _self._offer_compare_pending.pop(message.from_user.id, None)
+        await message.answer("⏳ Извлекаю текст...")
+        text = await _extract_text_from_doc(message)
+        if not text or len(text.strip()) < 50:
+            await message.answer("Не удалось извлечь текст из документа.")
+            return
+        existing = await queries.get_stored_offer(compare_locale)
+        old_text = existing["text_content"] if existing else ""
+        await message.answer("🔄 Сравниваю версии через Claude Sonnet...")
+        await _do_offer_compare(message, old_text, text)
+        return
+
+    # Check FSM state for offer upload
+    data = await state.get_data()
+    locale = data.get("offer_locale")
+    current_state = await state.get_state()
+
+    if current_state == OfferFSM.waiting_pdf and locale:
+        await state.clear()
+        await message.answer("⏳ Скачиваю документ...")
+        text = await _extract_text_from_doc(message)
+        if not text or len(text.strip()) < 50:
+            await message.answer("Не удалось извлечь текст из документа.")
+            return
+        filename = message.document.file_name or "document"
+        locale_name = {"ru": "🇷🇺 Россия", "hy": "🇦🇲 Армения", "kz": "🇰🇿 Казахстан"}.get(locale, locale.upper())
+
+        # Save to DB (replaces old automatically via ON CONFLICT)
+        await queries.save_stored_offer(locale, text, filename, message.from_user.id, filename)
+
+        # Save to Obsidian
+        try:
+            from bot.services.obsidian import save_offer_to_obsidian
+            await save_offer_to_obsidian(locale, filename, text)
+        except Exception as e:
+            print(f"[offer] Obsidian save failed: {e}")
+
+        await message.answer(
+            f"✅ <b>Оферта WB · {locale_name} обновлена</b>\n\n"
+            f"📄 Файл: {filename}\n"
+            f"💾 Сохранена в базу и Obsidian.\n\n"
+            f"Теперь бот будет сверять данные с этой версией при анализе новостей.",
+            parse_mode="HTML",
+        )
+        return
+
+    # No offer context — treat as general document analysis
     await message.answer("⏳ Скачиваю документ...")
     text = await _extract_text_from_doc(message)
     if not text or len(text.strip()) < 50:
         await message.answer("Не удалось извлечь текст из документа.")
         return
     filename = message.document.file_name or "document"
-    await state.update_data(offer_text=text, offer_filename=filename)
-    await state.set_state(OfferFSM.waiting_locale)
     await message.answer(
-        f"📄 Документ получен: <b>{filename}</b>\n\nВыбери тип документа:",
+        f"📄 Документ получен: <b>{filename}</b>\n\nЧто сделать?",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="🇷🇺 Оферта RU", callback_data="offer_locale:ru"),
-                InlineKeyboardButton(text="🇦🇲 Оферта HY", callback_data="offer_locale:hy"),
+                InlineKeyboardButton(text="🇷🇺 Сохранить как RU оферту", callback_data="offer_save_doc:ru"),
+                InlineKeyboardButton(text="🇦🇲 Сохранить как HY оферту", callback_data="offer_save_doc:hy"),
             ],
-            [
-                InlineKeyboardButton(text="🇰🇿 Оферта KZ", callback_data="offer_locale:kz"),
-                InlineKeyboardButton(text="❌ Просто анализ", callback_data="offer_locale:analyze_only"),
-            ],
+            [InlineKeyboardButton(text="📊 Только анализ", callback_data="offer_save_doc:analyze")],
         ]),
     )
+    import bot.handlers.moderation as _self2
+    if not hasattr(_self2, "_doc_cache"):
+        _self2._doc_cache = {}
+    _self2._doc_cache[message.from_user.id] = {"text": text, "filename": filename}
 
 
-@router.callback_query(F.data.startswith("offer_locale:"))
-async def handle_offer_locale(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("offer_save_doc:"))
+async def handle_offer_save_doc(callback: CallbackQuery) -> None:
     locale = callback.data.split(":")[1]
-    data = await state.get_data()
-    text = data.get("offer_text", "")
-    filename = data.get("offer_filename", "")
-    await state.clear()
-    if locale == "analyze_only":
-        await callback.message.edit_text("🤖 Запускаю анализ через Claude Sonnet...")
+    import bot.handlers.moderation as _self
+    data = getattr(_self, "_doc_cache", {}).get(callback.from_user.id)
+    if not data:
+        await callback.answer("Данные устарели. Отправь документ ещё раз.", show_alert=True)
+        return
+    text = data["text"]
+    filename = data["filename"]
+
+    if locale == "analyze":
+        await callback.message.edit_text("🤖 Анализирую через Claude Sonnet...")
         await _do_offer_analysis(callback.message, text, filename, callback.from_user.id)
         await callback.answer()
         return
-    existing = await queries.get_stored_offer(locale)
-    locale_name = {"ru": "Русская", "hy": "Армянская", "kz": "Казахстанская"}.get(locale, locale)
-    await state.update_data(offer_text=text, offer_filename=filename, offer_locale=locale)
-    if existing:
-        old_date = str(existing.get("uploaded_at", ""))[:10]
-        old_file = existing.get("filename", "—")
-        await callback.message.edit_text(
-            f"📂 Уже есть базовая <b>{locale_name}</b> версия:\n• {old_file} ({old_date})\n\nЧто сделать?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Заменить + сравнить", callback_data="offer_action:replace_compare")],
-                [InlineKeyboardButton(text="📊 Только сравнить", callback_data="offer_action:compare_only")],
-                [InlineKeyboardButton(text="💾 Заменить без сравнения", callback_data="offer_action:replace_only")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="offer_action:cancel")],
-            ]),
-        )
-    else:
-        await callback.message.edit_text(
-            f"Сохранить как базовую <b>{locale_name}</b> версию оферты?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Сохранить", callback_data="offer_action:save_new")],
-                [InlineKeyboardButton(text="📊 Только анализ", callback_data="offer_action:analyze_only")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="offer_action:cancel")],
-            ]),
-        )
+
+    locale_name = {"ru": "🇷🇺 Россия", "hy": "🇦🇲 Армения"}.get(locale, locale.upper())
+    await queries.save_stored_offer(locale, text, filename, callback.from_user.id, filename)
+    try:
+        from bot.services.obsidian import save_offer_to_obsidian
+        await save_offer_to_obsidian(locale, filename, text)
+    except Exception as e:
+        print(f"[offer] Obsidian save failed: {e}")
+
+    await callback.message.edit_text(
+        f"✅ Оферта WB · {locale_name} сохранена: <b>{filename}</b>",
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("offer_action:"))
-async def handle_offer_action(callback: CallbackQuery, state: FSMContext) -> None:
-    action = callback.data.split(":")[1]
-    data = await state.get_data()
-    text = data.get("offer_text", "")
-    filename = data.get("offer_filename", "")
-    locale = data.get("offer_locale", "ru")
-    await state.clear()
-    if action == "cancel":
-        await callback.message.edit_text("Отменено.")
-        await callback.answer()
-        return
-    if action in ("save_new", "replace_only"):
-        await queries.save_stored_offer(locale, text, filename, callback.from_user.id, filename)
-        locale_name = {"ru": "Русская", "hy": "Армянская", "kz": "Казахстанская"}.get(locale, locale)
-        await callback.message.edit_text(f"✅ <b>{locale_name}</b> версия сохранена как базовая: {filename}", parse_mode="HTML")
-        await callback.answer()
-        return
-    if action == "analyze_only":
-        await callback.message.edit_text("🤖 Анализирую через Claude...")
-        await _do_offer_analysis(callback.message, text, filename, callback.from_user.id)
-        await callback.answer()
-        return
-    if action in ("replace_compare", "compare_only"):
-        existing = await queries.get_stored_offer(locale)
-        old_text = existing["text_content"] if existing else ""
-        await callback.message.edit_text("🔄 Сравниваю версии через Claude Sonnet...")
-        try:
-            from bot.services.llm import compare_offers
-            result = await compare_offers(old_text, text)
-            urgency_emoji = "🔴" if result.get("urgency") == 1 else "🟡"
-            if not result.get("has_changes"):
-                await callback.message.answer("✅ Документы идентичны — изменений не обнаружено.")
-            else:
-                parts = [f"{urgency_emoji} <b>Сравнение версий оферты WB</b>\n"]
-                critical = "\n".join(f"  ⚠️ {x}" for x in result.get("critical_changes", []))
-                numbers = "\n".join(f"  💰 {x}" for x in result.get("numbers_changed", []))
-                changed = "\n".join(f"  🔄 {x}" for x in result.get("changed", []))
-                added = "\n".join(f"  ✅ {x}" for x in result.get("added", []))
-                removed = "\n".join(f"  ❌ {x}" for x in result.get("removed", []))
-                if critical: parts.append(f"<b>🚨 Критично:</b>\n{critical}")
-                if numbers: parts.append(f"<b>💰 Цифры:</b>\n{numbers}")
-                if changed: parts.append(f"<b>🔄 Изменено:</b>\n{changed}")
-                if added: parts.append(f"<b>✅ Добавлено:</b>\n{added}")
-                if removed: parts.append(f"<b>❌ Удалено:</b>\n{removed}")
-                parts.append(f"<b>Резюме:</b> {result.get('summary_ru', '—')}")
-                await callback.message.answer("\n\n".join(parts), parse_mode="HTML")
-                if result.get("urgency") == 1:
-                    content_hash = hashlib.sha256(text.encode()).hexdigest()
-                    await callback.message.answer(
-                        "⚠️ Критичные изменения! Создать пост?", parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                            InlineKeyboardButton(text="✅ Создать пост", callback_data=f"offer_post:{content_hash[:16]}"),
-                            InlineKeyboardButton(text="❌ Не надо", callback_data="offer_skip"),
-                        ]]),
-                    )
-        except Exception as e:
-            await callback.message.answer(f"Ошибка сравнения: {e}")
-        if action == "replace_compare":
-            await queries.save_stored_offer(locale, text, filename, callback.from_user.id, filename)
-            await callback.message.answer(f"💾 Новая версия сохранена как базовая ({filename}).")
-    await callback.answer()
+async def _do_offer_compare(message: Message, old_text: str, new_text: str) -> None:
+    try:
+        from bot.services.llm import compare_offers
+        result = await compare_offers(old_text, new_text)
+        urgency_emoji = "🔴" if result.get("urgency") == 1 else "🟡"
+        if not result.get("has_changes"):
+            await message.answer("✅ Документы идентичны — изменений не обнаружено.")
+            return
+        parts = [f"{urgency_emoji} <b>Сравнение версий оферты WB</b>\n"]
+        critical = "\n".join(f"  ⚠️ {x}" for x in result.get("critical_changes", []))
+        numbers = "\n".join(f"  💰 {x}" for x in result.get("numbers_changed", []))
+        changed = "\n".join(f"  🔄 {x}" for x in result.get("changed", []))
+        added = "\n".join(f"  ✅ {x}" for x in result.get("added", []))
+        removed = "\n".join(f"  ❌ {x}" for x in result.get("removed", []))
+        if critical:
+            parts.append(f"<b>🚨 Критично:</b>\n{critical}")
+        if numbers:
+            parts.append(f"<b>💰 Цифры:</b>\n{numbers}")
+        if changed:
+            parts.append(f"<b>🔄 Изменено:</b>\n{changed}")
+        if added:
+            parts.append(f"<b>✅ Добавлено:</b>\n{added}")
+        if removed:
+            parts.append(f"<b>❌ Удалено:</b>\n{removed}")
+        parts.append(f"<b>Резюме:</b> {result.get('summary_ru', '—')}")
+        await message.answer("\n\n".join(parts), parse_mode="HTML")
+        if result.get("urgency") == 1:
+            content_hash = hashlib.sha256(new_text.encode()).hexdigest()
+            await message.answer(
+                "⚠️ Критичные изменения! Создать пост?",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="✅ Создать пост", callback_data=f"offer_post:{content_hash[:16]}"),
+                    InlineKeyboardButton(text="❌ Не надо", callback_data="offer_skip"),
+                ]]),
+            )
+    except Exception as e:
+        await message.answer(f"Ошибка сравнения: {e}")
 
 
 async def _do_offer_analysis(message: Message, text: str, filename: str, user_id: int) -> None:
@@ -787,6 +874,30 @@ async def _do_offer_analysis(message: Message, text: str, filename: str, user_id
                 ]]))
     except Exception as e:
         await message.answer(f"Ошибка анализа: {e}")
+
+
+@router.message(Command("setup_notes"))
+async def cmd_setup_notes(message: Message) -> None:
+    """Push project architecture & env vars reference to Obsidian."""
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await message.answer("Только для администраторов.")
+        return
+    await message.answer("⏳ Сохраняю документацию в Obsidian...")
+    try:
+        from bot.services.obsidian import push_project_setup_notes
+        ok = await push_project_setup_notes()
+        if ok:
+            await message.answer(
+                "✅ Документация сохранена в Obsidian:\n"
+                "<code>Настройки/Архитектура_бота.md</code>\n\n"
+                "Там есть: архитектура, таблицы БД, список переменных Railway, модели Claude.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer("⚠️ Не удалось сохранить — проверь OBSIDIAN_GITHUB_TOKEN и OBSIDIAN_GITHUB_REPO.")
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
 
 
 @router.message(Command("offer"))

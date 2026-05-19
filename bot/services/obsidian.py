@@ -167,6 +167,139 @@ status: published
     return filename
 
 
+async def save_offer_to_obsidian(locale: str, filename: str, text: str) -> bool:
+    """Save/replace stored offer text in Obsidian."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    locale_names = {"ru": "Россия", "hy": "Армения", "kz": "Казахстан"}
+    locale_label = locale_names.get(locale, locale.upper())
+    filename_safe = filename.replace("/", "-").replace(":", "-")
+    obs_filename = f"Оферты/WB_{locale.upper()}/оферта_{locale.upper()}_{date_str}_{filename_safe}.md"
+    content = f"""---
+date: {date_str}
+locale: {locale}
+filename: {filename}
+type: offer
+status: active
+---
+
+# Оферта WB · {locale_label} · {date_str}
+
+> Загружена: {filename}
+
+## Текст оферты
+
+{text[:30000]}
+"""
+    return await _github_put(obs_filename, content, f"📄 Оферта WB {locale.upper()} обновлена: {filename_safe}")
+
+
+async def push_project_setup_notes() -> bool:
+    """Push project architecture and setup reference to Obsidian."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    content = f"""---
+date: {date_str}
+type: setup
+---
+
+# GoToTop Analytics Bot — Настройка и архитектура
+
+> Последнее обновление: {date_str}
+
+## Переменные окружения Railway
+
+Все значения хранятся в Railway → Service → Variables.
+**Не записывать реальные значения в этот файл!**
+
+| Переменная | Описание | Где взять |
+|---|---|---|
+| `BOT_TOKEN` | Токен Telegram-бота | @BotFather |
+| `WEBHOOK_HOST` | URL деплоя Railway | Railway → Domains |
+| `DATABASE_URL` | PostgreSQL строка подключения | Railway → PostgreSQL → Connect |
+| `ANTHROPIC_API_KEY` | Ключ Claude API | console.anthropic.com |
+| `TG_API_ID` | Telegram API ID для Telethon | my.telegram.org |
+| `TG_API_HASH` | Telegram API Hash для Telethon | my.telegram.org |
+| `TG_SESSION` | Telethon StringSession | Сгенерировать скриптом |
+| `OBSIDIAN_GITHUB_TOKEN` | GitHub токен для записи в Obsidian | GitHub → Settings → Tokens |
+| `OBSIDIAN_GITHUB_REPO` | Репозиторий Obsidian | Пример: `gototop686/wb-notes` |
+
+## Архитектура бота
+
+```
+Источники данных
+├── Telethon (Telegram каналы — реальное время)
+├── RSS (ГосСМИ, WB блог — каждые 6ч/сутки)
+├── Google News (ежедневно)
+└── Форумы VC.ru (ежедневно)
+        ↓
+Фильтрация (бесплатно)
+├── Ключевые слова CORE/CONTEXT
+└── Архивирование старых > 7 дней
+        ↓
+Claude Haiku
+├── Кластеризация похожих новостей
+├── Классификация (label, market, confidence)
+└── Обнаружение стратегий
+        ↓
+Claude Sonnet
+└── Генерация поста (RU + HY, с блоками 🇷🇺/🇦🇲/💡)
+        ↓
+Авто-публикация по рынку
+├── RU → @GTTnews
+├── HY → @gttnewsam
+├── both → оба канала
+└── unclear → чат черновиков (ручная маршрутизация)
+        ↓
+Obsidian (GitHub API)
+├── RAW/ — все классифицированные события
+├── WB_Россия/ / WB_Армения/ / WB_ЕАЭС/ — опубликованные посты
+├── Стратегии/ — одобренные стратегии GoToTop
+└── Оферты/ — текущие версии оферт WB
+```
+
+## База данных (PostgreSQL Railway)
+
+| Таблица | Назначение |
+|---|---|
+| `source_registry` | Источники (Telegram/RSS/YouTube) |
+| `raw_events` | Все собранные события |
+| `drafts` | Черновики постов |
+| `publishes` | Лог публикаций (канал, message_id, obsidian_path) |
+| `stored_offers` | Тексты оферт WB (RU/HY/KZ) |
+| `strategies` | База стратегий GoToTop (RAG-контекст) |
+| `strategy_proposals` | Предложения стратегий от Claude (на одобрение) |
+| `rbac_users` | Администраторы и модераторы |
+| `bot_settings` | Настройки бота (промпты, ключевые слова) |
+| `llm_costs` | Лог расходов на Claude |
+
+## Модели Claude
+
+- **Haiku-4-5** — классификация, кластеризация (дёшево и быстро)
+- **Sonnet-4-6** — генерация постов, анализ оферт, сравнение версий
+
+## Деплой
+
+- Платформа: **Railway**
+- Webhook: aiogram 3 + aiohttp
+- Планировщик: APScheduler
+  - Каждые 6ч: обработка Telegram/YouTube
+  - Ежедневно 10:00: обработка медиа-RSS
+  - Еженедельно пн 11:00: обработка госисточников
+
+## Ключевые решения
+
+- Tier-1 (критично) → уведомление модераторов + авто-публикация
+- Tier-2 (дайджест) → только авто-публикация
+- Кластеризация: Haiku группирует похожие новости, один пост на кластер
+- Стратегии GoToTop: Claude предлагает → admin одобряет → становится RAG-контекстом
+- Удаление поста: из Telegram + из Obsidian одновременно
+"""
+    return await _github_put(
+        "Настройки/Архитектура_бота.md",
+        content,
+        f"📚 Обновлена документация архитектуры бота ({date_str})",
+    )
+
+
 async def save_strategy_to_obsidian(
     title: str,
     body: str,
