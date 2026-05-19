@@ -125,6 +125,28 @@ async def upsert_user(tg_user_id: int, username: str | None, role: str) -> None:
     )
 
 
+async def log_llm_cost(operation: str, input_tokens: int, output_tokens: int, model: str, cost_usd: float) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO llm_cost_log (operation, input_tokens, output_tokens, model, cost_usd) VALUES ($1,$2,$3,$4,$5)",
+        operation, input_tokens, output_tokens, model, cost_usd,
+    )
+
+
+async def get_llm_cost_total() -> float:
+    pool = await get_pool()
+    val = await pool.fetchval("SELECT COALESCE(SUM(cost_usd), 0) FROM llm_cost_log")
+    return float(val)
+
+
+async def get_sources_by_type() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT source_type, locale, COUNT(*) as cnt FROM source_registry WHERE active=TRUE GROUP BY source_type, locale ORDER BY source_type, locale"
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_bot_stats() -> dict:
     pool = await get_pool()
     raw_count = await pool.fetchval("SELECT COUNT(*) FROM raw_events")

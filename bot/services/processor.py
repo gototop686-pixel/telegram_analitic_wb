@@ -31,14 +31,14 @@ async def process_unprocessed_events(bot: Bot) -> int:
             )
 
             alert_tier = classification.get("alert_tier", 2)
-            if alert_tier == 1:
-                # Critical: send to moderators immediately
-                await send_draft_to_moderators(
-                    draft_id=draft_id,
-                    body_ru=post.get("body_ru", ""),
-                    body_hy=post.get("body_hy", ""),
-                    bot=bot,
-                )
+            tier_emoji = "🔴 КРИТИЧНО" if alert_tier == 1 else "🟡 Дайджест"
+            await send_draft_to_moderators(
+                draft_id=draft_id,
+                body_ru=post.get("body_ru", ""),
+                body_hy=post.get("body_hy", ""),
+                bot=bot,
+                tier_label=tier_emoji,
+            )
 
             await queries.mark_event_processed(event["id"])
             processed += 1

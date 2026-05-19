@@ -11,6 +11,19 @@ def get_client() -> anthropic.AsyncAnthropic:
     return _client
 
 
+GOTOTOP_CONTEXT = """Ты аналитик компании GoToTop — консалтинговой компании для продавцов на Wildberries.
+Аудитория: армянские предприниматели, работающие с WB в рамках ЕАЭС.
+Особо важно для них:
+- Изменения комиссий, тарифов, логистики WB
+- Изменения оферты WB (влияют на все продажи)
+- Таможенные правила ЕАЭС для торговли Армения-Россия
+- Регуляторные изменения РФ и Армении для маркетплейсов
+- Действия ФАС против WB
+- Блокировки и штрафы продавцов
+
+КРИТИЧНО (tier 1): изменения оферты, штрафы/блокировки, таможенные законы, новые требования к продавцам, решения ФАС.
+ДАЙДЖЕСТ (tier 2): советы, SEO, статистика, общие новости рынка."""
+
 TAXONOMY = [
     "Регуляторика_RU", "Регуляторика_AM", "Таможня_ЕАЭС",
     "Маркетплейс_политика_WB", "Изменение_оферты", "Коммуникации_WB",
@@ -18,27 +31,30 @@ TAXONOMY = [
     "Анализ_ниши", "Финопереключатели", "Комиссии_логистика", "SEO_карточки",
 ]
 
-CLASSIFY_PROMPT = """Ты аналитик маркетплейса Wildberries. Получи текст и:
-1. Определи тему из списка: {taxonomy}
+CLASSIFY_PROMPT = """{context}
+
+Получи текст и:
+1. Определи тему из списка: {{taxonomy}}
 2. Напиши краткое резюме на русском (2-3 предложения)
 3. Напиши краткое резюме на армянском (2-3 предложения)
 4. Оцени уровень важности: 1 (критично, срочно) или 2 (дайджест)
 
 Ответь строго в формате JSON:
-{{
+{{{{
   "label": "...",
   "confidence": 0.0-1.0,
   "summary_ru": "...",
   "summary_hy": "...",
   "alert_tier": 1 или 2,
   "entities": ["ключевые сущности"]
-}}
+}}}}
 
 Текст:
-{text}"""
+{{text}}""".format(context=GOTOTOP_CONTEXT)
 
 
 async def classify_and_summarize(text: str) -> dict:
+    import json
     client = get_client()
     prompt = CLASSIFY_PROMPT.format(
         taxonomy=", ".join(TAXONOMY),
@@ -46,12 +62,11 @@ async def classify_and_summarize(text: str) -> dict:
     )
     response = await client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=600,
+        max_tokens=800,
         messages=[{"role": "user", "content": prompt}],
     )
-    import json
+    await _log_cost("classify", response, "claude-haiku-4-5-20251001")
     raw = response.content[0].text.strip()
-    # strip markdown fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -59,7 +74,24 @@ async def classify_and_summarize(text: str) -> dict:
     return json.loads(raw)
 
 
-DRAFT_PROMPT = """Ты редактор аналитического канала про Wildberries.
+async def _log_cost(operation: str, response, model: str) -> None:
+    try:
+        from bot.db import queries
+        inp = response.usage.input_tokens
+        out = response.usage.output_tokens
+        # Approximate costs per million tokens
+        rates = {
+            "claude-haiku-4-5-20251001": (0.80, 4.00),
+            "claude-sonnet-4-6": (3.00, 15.00),
+        }
+        in_rate, out_rate = rates.get(model, (3.00, 15.00))
+        cost = (inp * in_rate + out * out_rate) / 1_000_000
+        await queries.log_llm_cost(operation, inp, out, model, cost)
+    except Exception:
+        pass
+
+
+DRAFT_PROMPT = """Ты редактор аналитического Telegram-канала GoToTop про Wildberries для армянских продавцов.
 Напиши пост на основе аналитики ниже.
 
 Тема: {label}
@@ -138,6 +170,7 @@ async def generate_post(label: str, summary_ru: str, entities: list, confidence_
         messages=[{"role": "user", "content": prompt}],
     )
     import json
+    await _log_cost("generate_post", response, "claude-sonnet-4-6")
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]

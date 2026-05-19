@@ -54,6 +54,18 @@ async def handle_approve(callback: CallbackQuery) -> None:
     )
     await callback.answer("Опубликовано!")
 
+    # Save to Obsidian via GitHub
+    try:
+        from bot.services.obsidian import save_to_obsidian
+        await save_to_obsidian(
+            title=f"Черновик #{draft_id}",
+            body_ru=draft.get("body_ru", ""),
+            label="WB Analytics",
+            draft_id=draft_id,
+        )
+    except Exception:
+        pass
+
 
 @router.callback_query(F.data.startswith("reject:"))
 async def handle_reject(callback: CallbackQuery) -> None:
@@ -121,6 +133,58 @@ async def cmd_addmod(message: Message) -> None:
     role = parts[2] if len(parts) > 2 and parts[2] in ("admin", "moderator", "viewer") else "moderator"
     await queries.upsert_user(target_id, None, role)
     await message.answer(f"✅ Пользователь <code>{target_id}</code> добавлен как <b>{role}</b>.", parse_mode="HTML")
+
+
+@router.message(Command("ingest"))
+async def cmd_ingest(message: Message) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        await message.answer("Нет доступа.")
+        return
+    await message.answer("⏳ Запускаю парсинг всех источников...")
+    try:
+        from bot.services.ingestion import run_all_ingestion
+        results = await run_all_ingestion()
+        await message.answer(
+            f"✅ Парсинг завершён:\n"
+            f"• RSS: {results['rss']} новых\n"
+            f"• YouTube: {results['youtube']} новых\n"
+            f"• Google News: {results['google_news']} новых"
+        )
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+
+@router.message(Command("process"))
+async def cmd_process(message: Message) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        await message.answer("Нет доступа.")
+        return
+    await message.answer("⏳ Запускаю обработку событий через Claude...")
+    try:
+        from bot.services.processor import process_unprocessed_events
+        count = await process_unprocessed_events(message.bot)
+        await message.answer(f"✅ Обработано событий: {count}")
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+
+@router.message(Command("sources"))
+async def cmd_sources(message: Message) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if message.from_user.id not in moderator_ids:
+        await message.answer("Нет доступа.")
+        return
+    rows = await queries.get_sources_by_type()
+    lines = ["<b>🔗 Активные источники:</b>\n"]
+    type_map = {"telegram": "Telegram", "rss": "RSS", "youtube": "YouTube", "web": "Web"}
+    for row in rows:
+        t = type_map.get(row["source_type"], row["source_type"])
+        lines.append(f"• {t} [{row['locale']}]: {row['cnt']} шт.")
+    cost = await queries.get_llm_cost_total()
+    lines.append(f"\n💰 Потрачено на Claude: ${cost:.4f}")
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command("me"))

@@ -23,12 +23,14 @@ async def publish_draft(draft: dict, locale: str, bot: Bot) -> int:
     return published
 
 
-async def send_draft_to_moderators(draft_id: int, body_ru: str, body_hy: str, bot: Bot) -> None:
+async def send_draft_to_moderators(
+    draft_id: int, body_ru: str, body_hy: str, bot: Bot, tier_label: str = "🟡 Дайджест"
+) -> None:
     from bot.handlers.moderation import draft_keyboard
 
     moderator_ids = await queries.get_moderator_ids()
     preview = (
-        f"📋 <b>Новый черновик #{draft_id}</b>\n\n"
+        f"📋 <b>Черновик #{draft_id}</b> {tier_label}\n\n"
         f"🇷🇺 <b>RU:</b>\n{body_ru[:800]}\n\n"
         f"🇦🇲 <b>HY:</b>\n{body_hy[:400] if body_hy else '—'}"
     )
@@ -38,7 +40,7 @@ async def send_draft_to_moderators(draft_id: int, body_ru: str, body_hy: str, bo
                 mod_id,
                 preview,
                 parse_mode="HTML",
-                reply_markup=draft_keyboard(draft_id, "ru"),
+                reply_markup=draft_keyboard(draft_id),
             )
         except Exception as e:
             print(f"[publisher] Cannot reach moderator {mod_id}: {e}")
