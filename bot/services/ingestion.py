@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import httpx
 import feedparser
@@ -10,9 +11,18 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _parse_feed_sync(url: str):
+    return feedparser.parse(url)
+
+
+async def _parse_feed(url: str):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _parse_feed_sync, url)
+
+
 async def ingest_rss(source: dict) -> int:
     url = source["identifier"]
-    feed = feedparser.parse(url)
+    feed = await _parse_feed(url)
     saved = 0
     for entry in feed.entries[:20]:
         body = entry.get("summary", "") or entry.get("description", "")
@@ -121,7 +131,7 @@ async def ingest_google_news() -> int:
     for query in GOOGLE_NEWS_QUERIES:
         url = base + query.replace(" ", "+")
         try:
-            feed = feedparser.parse(url)
+            feed = await _parse_feed(url)
             for entry in feed.entries[:10]:
                 title = entry.get("title", "")
                 link = entry.get("link", "")

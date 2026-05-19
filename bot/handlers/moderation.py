@@ -141,18 +141,23 @@ async def cmd_ingest(message: Message) -> None:
     if message.from_user.id not in moderator_ids:
         await message.answer("Нет доступа.")
         return
-    await message.answer("⏳ Запускаю парсинг всех источников...")
-    try:
-        from bot.services.ingestion import run_all_ingestion
-        results = await run_all_ingestion()
-        await message.answer(
-            f"✅ Парсинг завершён:\n"
-            f"• RSS: {results['rss']} новых\n"
-            f"• YouTube: {results['youtube']} новых\n"
-            f"• Google News: {results['google_news']} новых"
-        )
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+    status_msg = await message.answer("⏳ Парсинг запущен в фоне. Займёт 1-2 минуты...")
+
+    async def _run():
+        try:
+            from bot.services.ingestion import run_all_ingestion
+            results = await run_all_ingestion()
+            await message.answer(
+                f"✅ Парсинг завершён:\n"
+                f"• RSS: {results['rss']} новых\n"
+                f"• YouTube: {results['youtube']} новых\n"
+                f"• Google News: {results['google_news']} новых"
+            )
+        except Exception as e:
+            await message.answer(f"Ошибка парсинга: {e}")
+
+    import asyncio
+    asyncio.create_task(_run())
 
 
 @router.message(Command("process"))
@@ -161,13 +166,18 @@ async def cmd_process(message: Message) -> None:
     if message.from_user.id not in moderator_ids:
         await message.answer("Нет доступа.")
         return
-    await message.answer("⏳ Запускаю обработку событий через Claude...")
-    try:
-        from bot.services.processor import process_unprocessed_events
-        count = await process_unprocessed_events(message.bot)
-        await message.answer(f"✅ Обработано событий: {count}")
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+    await message.answer("⏳ Обработка запущена в фоне...")
+
+    async def _run():
+        try:
+            from bot.services.processor import process_unprocessed_events
+            count = await process_unprocessed_events(message.bot)
+            await message.answer(f"✅ Обработано событий через Claude: {count}")
+        except Exception as e:
+            await message.answer(f"Ошибка: {e}")
+
+    import asyncio
+    asyncio.create_task(_run())
 
 
 @router.message(Command("sources"))
@@ -302,3 +312,55 @@ async def handle_offer_upload(message: Message) -> None:
 async def handle_offer_skip(callback: CallbackQuery) -> None:
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer("Пропущено.")
+
+
+@router.callback_query(F.data.startswith("offer_post:"))
+async def handle_offer_post(callback: CallbackQuery) -> None:
+    moderator_ids = await queries.get_moderator_ids()
+    if callback.from_user.id not in moderator_ids:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Генерирую пост...")
+    await callback.message.answer("⏳ Генерирую пост через Claude Sonnet...")
+
+    try:
+        # Get the last offer raw_event
+        from bot.db.pool import get_pool
+        pool = await get_pool()
+        row = await pool.fetchrow(
+            "SELECT * FROM raw_events WHERE source_type='offer' ORDER BY fetched_at DESC LIMIT 1"
+        )
+        if not row:
+            await callback.message.answer("Не найдена оферта в базе.")
+            return
+
+        from bot.services.llm import classify_and_summarize, generate_post
+        text = f"{row['title'] or ''}\n{row['body'] or ''}"
+        classification = await classify_and_summarize(text)
+
+        post = await generate_post(
+            label=classification.get("label", "Изменение_оферты"),
+            summary_ru=classification.get("summary_ru", ""),
+            entities=classification.get("entities", []),
+            confidence_band="confirmed_official",
+        )
+
+        draft_id = await queries.create_draft(
+            body_ru=post.get("body_ru", ""),
+            body_hy=post.get("body_hy", ""),
+        )
+
+        from bot.services.publisher import send_draft_to_moderators
+        await send_draft_to_moderators(
+            draft_id=draft_id,
+            body_ru=post.get("body_ru", ""),
+            body_hy=post.get("body_hy", ""),
+            bot=callback.bot,
+            tier_label="🔴 ОФЕРТА",
+        )
+        await callback.message.answer(f"✅ Черновик #{draft_id} создан и отправлен на модерацию.")
+
+    except Exception as e:
+        await callback.message.answer(f"Ошибка: {e}")
