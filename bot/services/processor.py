@@ -186,7 +186,7 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
         except Exception as e:
             err_str = str(e)
             # API errors (no credits, rate limit) — keep events in queue for retry
-            if any(kw in err_str for kw in ("credit balance", "rate_limit", "529", "overloaded", "GEMINI", "quota")):
+            if any(kw in err_str.lower() for kw in ("credit balance", "rate_limit", "529", "overloaded", "gemini", "quota", "api error")):
                 print(f"[processor] API error on {representative['id']}, keeping in queue: {e}")
             else:
                 # Other errors (bad JSON, missing field) — mark processed to avoid infinite loop
@@ -358,7 +358,7 @@ async def process_by_source_type(bot: Bot, source_type: str) -> int:
             processed += 1
         except Exception as e:
             err_str = str(e)
-            if any(kw in err_str for kw in ("credit balance", "rate_limit", "529", "overloaded", "GEMINI", "quota")):
+            if any(kw in err_str.lower() for kw in ("credit balance", "rate_limit", "529", "overloaded", "gemini", "quota", "api error")):
                 print(f"[processor] API error on {representative['id']}, keeping in queue: {e}")
             else:
                 print(f"[processor] Processing error on {representative['id']}, marking done: {e}")

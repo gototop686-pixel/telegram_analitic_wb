@@ -891,6 +891,34 @@ async def _do_offer_analysis(message: Message, text: str, filename: str, user_id
         await message.answer(f"Ошибка анализа: {e}")
 
 
+@router.message(Command("test_gemini"))
+async def cmd_test_gemini(message: Message) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        return
+    await message.answer("🔍 Тестирую Gemini API...")
+    try:
+        from bot.services.llm import _gemini, GEMINI_API_KEY, GEMINI_MODEL
+        if not GEMINI_API_KEY:
+            await message.answer("❌ <code>GEMINI_API_KEY</code> не установлен в Railway Variables.", parse_mode="HTML")
+            return
+        result = await _gemini("Скажи 'OK' одним словом.", max_tokens=10)
+        await message.answer(
+            f"✅ <b>Gemini работает!</b>\n\n"
+            f"Модель: <code>{GEMINI_MODEL}</code>\n"
+            f"Ответ: <code>{result[:100]}</code>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await message.answer(
+            f"❌ <b>Ошибка Gemini:</b>\n<code>{e}</code>\n\n"
+            f"Проверь:\n"
+            f"• Правильно ли скопирован ключ в Railway\n"
+            f"• Ключ должен начинаться с <code>AIza</code>",
+            parse_mode="HTML",
+        )
+
+
 @router.message(Command("dbcheck"))
 async def cmd_dbcheck(message: Message) -> None:
     """Check DB schema — verify all migrations ran."""
