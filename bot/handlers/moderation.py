@@ -876,6 +876,39 @@ async def _do_offer_analysis(message: Message, text: str, filename: str, user_id
         await message.answer(f"Ошибка анализа: {e}")
 
 
+@router.message(Command("check_obsidian"))
+async def cmd_check_obsidian(message: Message) -> None:
+    """Diagnose Obsidian GitHub connection."""
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await message.answer("Только для администраторов.")
+        return
+    await message.answer("🔍 Проверяю подключение к GitHub...")
+    try:
+        from bot.services.obsidian import check_obsidian_connection
+        result = await check_obsidian_connection()
+        if result["ok"]:
+            privacy = "приватный 🔒" if result.get("private") else "публичный 🌐"
+            await message.answer(
+                f"✅ <b>Подключение работает!</b>\n\n"
+                f"👤 Аккаунт: <code>{result['login']}</code>\n"
+                f"📁 Репо: <code>{result['repo']}</code> ({privacy})",
+                parse_mode="HTML",
+            )
+        else:
+            login_line = f"\n👤 Аккаунт: <code>{result['login']}</code>" if result.get("login") else ""
+            await message.answer(
+                f"❌ <b>Ошибка подключения</b>{login_line}\n\n"
+                f"{result['error']}\n\n"
+                f"<b>Что проверить в Railway Variables:</b>\n"
+                f"• <code>OBSIDIAN_GITHUB_TOKEN</code> — токен GitHub (классический, с правами <b>repo</b>)\n"
+                f"• <code>OBSIDIAN_GITHUB_REPO</code> — название репо в формате <b>username/repo-name</b>",
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        await message.answer(f"Ошибка при проверке: {e}")
+
+
 @router.message(Command("setup_notes"))
 async def cmd_setup_notes(message: Message) -> None:
     """Push project architecture & env vars reference to Obsidian."""

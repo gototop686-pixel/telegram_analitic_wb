@@ -25,19 +25,63 @@ def _obsidian_folder(market: str, label: str) -> str:
         return "На_проверке"
 
 
+async def check_obsidian_connection() -> dict:
+    """Check GitHub connection and return status + error details."""
+    if not GITHUB_TOKEN:
+        return {"ok": False, "error": "OBSIDIAN_GITHUB_TOKEN не установлен в Railway"}
+    if not GITHUB_REPO:
+        return {"ok": False, "error": "OBSIDIAN_GITHUB_REPO не установлен в Railway"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        # Check token validity
+        me = await client.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if me.status_code == 401:
+            return {"ok": False, "error": "Токен OBSIDIAN_GITHUB_TOKEN недействителен или истёк"}
+        if me.status_code != 200:
+            return {"ok": False, "error": f"GitHub API ответил: {me.status_code}"}
+        login = me.json().get("login", "?")
+
+        # Check repo access
+        repo = await client.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}",
+            headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if repo.status_code == 404:
+            return {"ok": False, "error": f"Репозиторий «{GITHUB_REPO}» не найден\nПроверь название: user/repo-name", "login": login}
+        if repo.status_code == 403:
+            return {"ok": False, "error": f"Нет доступа к репо «{GITHUB_REPO}»\nТокен должен иметь права repo (read/write contents)", "login": login}
+        if repo.status_code != 200:
+            return {"ok": False, "error": f"Репо «{GITHUB_REPO}»: GitHub ответил {repo.status_code}", "login": login}
+
+        repo_data = repo.json()
+        is_private = repo_data.get("private", False)
+        return {
+            "ok": True,
+            "login": login,
+            "repo": GITHUB_REPO,
+            "private": is_private,
+        }
+
+
 async def _github_put(filename: str, content: str, commit_msg: str) -> bool:
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return False
     encoded = base64.b64encode(content.encode("utf-8")).decode()
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.put(
-            f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}",
-            headers={
-                "Authorization": f"token {GITHUB_TOKEN}",
-                "Accept": "application/vnd.github.v3+json",
-            },
-            json={"message": commit_msg, "content": encoded},
-        )
+        # Check if file already exists to get SHA (needed for updates)
+        get_resp = await client.get(url, headers=headers)
+        payload: dict = {"message": commit_msg, "content": encoded}
+        if get_resp.status_code == 200:
+            payload["sha"] = get_resp.json().get("sha", "")
+
+        resp = await client.put(url, headers=headers, json=payload)
     if resp.status_code in (200, 201):
         print(f"[obsidian] Saved: {filename}")
         return True
