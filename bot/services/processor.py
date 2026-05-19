@@ -4,20 +4,40 @@ from bot.db import queries
 from bot.services import llm
 from bot.services.publisher import send_draft_to_moderators
 
-# Keywords used for free pre-filtering before calling Claude.
-# If none of these appear in the text, we skip Claude entirely.
-_KEYWORDS = [
-    "wildberries", "вайлдберриз", "вб ", " wb ", "wb,", "wb.",
-    "маркетплейс", "комиссия", "логистика", "тариф", "штраф",
-    "таможня", "еаэс", "оферта", "продавец", "селлер",
-    "фас", "антимонополь", "озон", "ozon", "kaspi", "каспи",
-    "ввоз товар", "импорт", "торговля арм",
+# CORE keywords — must have at least one for any tier
+_CORE = [
+    "wildberries", "вайлдберриз", "seller.wildberries",
+    "wb ", " wb,", " wb.", "вб ", "вб,",
+    "маркетплейс", "маркетплейсы",
+    "оферта wb", "оферта вб",
+    "озон", "ozon", "kaspi", "каспи",
+    "селлер", "продавец на wb", "продавец на маркетплейс",
+]
+
+# CONTEXT keywords — support CORE; for weak sources, 2+ required without CORE
+_CONTEXT = [
+    "комиссия", "тариф", "логистика", "штраф за",
+    "таможня", "таможенн", "еаэс",
+    "фас ", "антимонопол",
+    "оферта", "личный кабинет продавца",
+    "поставщик", "карточка товара", "ранжирование",
+    "импорт товар", "ввоз товар", "торговля арм",
 ]
 
 
-def _keyword_passes(text: str) -> bool:
+def _keyword_passes(text: str, strict: bool = False) -> bool:
+    """
+    strict=True (for government/regulatory sources): requires at least 1 CORE keyword.
+    strict=False (for telegram/media): 1 CORE OR 2+ CONTEXT is enough.
+    """
     low = text.lower()
-    return any(kw in low for kw in _KEYWORDS)
+    has_core = any(kw in low for kw in _CORE)
+    if has_core:
+        return True
+    if strict:
+        return False
+    context_count = sum(1 for kw in _CONTEXT if kw in low)
+    return context_count >= 2
 
 
 async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> int:
@@ -32,8 +52,8 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
     relevant_labels_str = await queries.get_setting("relevant_labels", "")
     relevant_labels = set(relevant_labels_str.split(",")) if relevant_labels_str else set()
 
-    # For weekly (regulatory) tier, use stricter keyword filtering
-    strict_keywords = processing_tier == "weekly"
+    # Government RSS sources get strict keyword filtering (must have a CORE keyword)
+    strict_filter = processing_tier == "weekly"
 
     processed = 0
     for event in events:
@@ -43,9 +63,8 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
                 await queries.mark_event_processed(event["id"])
                 continue
 
-            # Free keyword pre-filter — skip Claude if text is clearly off-topic
-            if not _keyword_passes(text):
-                print(f"[processor] Keyword skip event {event['id']} (tier={processing_tier})")
+            if not _keyword_passes(text, strict=strict_filter):
+                print(f"[processor] Keyword skip {event['id']} (tier={processing_tier})")
                 await queries.mark_event_processed(event["id"])
                 continue
 
@@ -60,9 +79,23 @@ async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> 
             )
 
             if not is_relevant:
-                print(f"[processor] Skipped event {event['id']}: label={label}, confidence={confidence:.2f}")
+                print(f"[processor] Low relevance {event['id']}: label={label}, conf={confidence:.2f}")
                 await queries.mark_event_processed(event["id"])
                 continue
+
+            # Save RAW classified data to Obsidian (regardless of draft approval)
+            try:
+                from bot.services.obsidian import save_raw_to_obsidian
+                await save_raw_to_obsidian(
+                    source_type=event.get("source_type", ""),
+                    source_url=event.get("url", ""),
+                    title=event.get("title", ""),
+                    body=event.get("body", ""),
+                    classification=classification,
+                    event_id=event["id"],
+                )
+            except Exception as obs_err:
+                print(f"[obsidian] RAW save failed: {obs_err}")
 
             confidence_band = _get_confidence_band(classification)
             post = await llm.generate_post(

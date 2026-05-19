@@ -6,6 +6,30 @@ import os
 
 from bot.db import queries
 
+# Government/official sources produce huge volumes of off-topic content.
+# Pre-filter at ingestion time so the DB stays clean.
+_INGEST_CORE = [
+    "wildberries", "маркетплейс", "ozon", "озон", "kaspi",
+    "selfer", "селлер", "продавец", "еаэс", "таможн",
+    "комиссия", "тариф", "оферта", "фас ", "антимонопол",
+    "ввоз товар", "импорт товар", "торговля",
+]
+
+# Identifiers of government/regulatory RSS feeds that need pre-filtering
+_GOVERNMENT_IDENTIFIERS = {
+    "kremlin.ru", "fas.gov.ru", "nalog.gov.ru",
+    "gov.am", "parliament.am",
+}
+
+
+def _is_government_source(identifier: str) -> bool:
+    return any(gov in identifier for gov in _GOVERNMENT_IDENTIFIERS)
+
+
+def _ingest_keyword_passes(text: str) -> bool:
+    low = text.lower()
+    return any(kw in low for kw in _INGEST_CORE)
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
@@ -22,6 +46,7 @@ async def _parse_feed(url: str):
 
 async def ingest_rss(source: dict) -> int:
     url = source["identifier"]
+    is_gov = _is_government_source(url)
     feed = await _parse_feed(url)
     saved = 0
     for entry in feed.entries[:20]:
@@ -29,6 +54,9 @@ async def ingest_rss(source: dict) -> int:
         title = entry.get("title", "")
         link = entry.get("link", "")
         text = f"{title}\n{body}"
+        # Government sources: skip articles with no marketplace keywords at all
+        if is_gov and not _ingest_keyword_passes(text):
+            continue
         content_hash = _hash(text)
         event_id = await queries.insert_raw_event(
             source_id=source["id"],
