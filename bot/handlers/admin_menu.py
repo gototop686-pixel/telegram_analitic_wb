@@ -42,6 +42,9 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="🧠 Стратегии GoToTop", callback_data="menu:strategies"),
         ],
+        [
+            InlineKeyboardButton(text="🎛 Фильтры и модели", callback_data="menu:pipeline"),
+        ],
     ])
 
 
@@ -104,6 +107,19 @@ async def menu_sources(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
         "\n".join(lines), parse_mode="HTML", reply_markup=sources_menu_kb()
     )
+    await callback.answer()
+
+
+# ── Pipeline (Фильтры и модели) ────────────────────────────────────────────
+
+@router.callback_query(F.data == "menu:pipeline")
+async def menu_pipeline(callback: CallbackQuery) -> None:
+    from bot.handlers.moderation import _pipeline_text_and_kb
+    text, kb = await _pipeline_text_and_kb()
+    # Add back button
+    from aiogram.types import InlineKeyboardButton as IKB
+    kb.inline_keyboard.append([IKB(text="◀️ Назад", callback_data="menu:main")])
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 

@@ -30,7 +30,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
                 [KeyboardButton(text="⚙️ Управление"), KeyboardButton(text="🤖 Обработать")],
                 [KeyboardButton(text="📝 Черновики"), KeyboardButton(text="📄 Анализ оферты")],
                 [KeyboardButton(text="🔗 Анализ ссылки"), KeyboardButton(text="🧠 Стратегии")],
-                [KeyboardButton(text="🔬 Пайплайн"), KeyboardButton(text="🔍 Поиск")],
+                [KeyboardButton(text="🎛 Фильтры и модели"), KeyboardButton(text="🔍 Поиск")],
             ],
             resize_keyboard=True,
             persistent=True,
@@ -553,7 +553,7 @@ async def _pipeline_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
     return text, kb
 
 
-@router.message(F.text == "🔬 Пайплайн")
+@router.message(F.text == "🎛 Фильтры и модели")
 async def kb_pipeline(message: Message) -> None:
     admin_ids = await queries.get_admin_ids()
     if message.from_user.id not in admin_ids:
