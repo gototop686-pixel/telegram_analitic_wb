@@ -60,7 +60,7 @@ def build_scheduler(bot: Bot) -> AsyncIOScheduler:
     async def _digest():
         await _send_daily_digest(bot)
 
-    scheduler.add_job(_ingest, "interval", minutes=30, id="ingest")
+    scheduler.add_job(_ingest, "interval", hours=2, id="ingest")
     scheduler.add_job(_process_frequent, "interval", hours=6, id="process_frequent")
     scheduler.add_job(_process_daily, "cron", hour=10, minute=0, id="process_daily")
     scheduler.add_job(_process_weekly, "cron", day_of_week="mon", hour=11, minute=0, id="process_weekly")
@@ -70,16 +70,36 @@ def build_scheduler(bot: Bot) -> AsyncIOScheduler:
 
 async def _send_daily_digest(bot: Bot) -> None:
     from bot.db import queries
+    from bot.services.processor import _load_keywords, _keyword_passes
     moderator_ids = await queries.get_moderator_ids()
-    pending = await queries.get_unprocessed_events(limit=100)
-    if not pending:
+
+    # Pre-filter: count only keyword-relevant unprocessed events
+    all_pending = await queries.get_unprocessed_events(limit=500)
+    core_kw, context_kw = await _load_keywords()
+    relevant = [
+        e for e in all_pending
+        if _keyword_passes(
+            f"{e.get('title', '')}\n{e.get('body', '')}",
+            core_kw, context_kw
+        )
+    ]
+    total = len(relevant)
+
+    if total == 0:
         return
-    text = f"📊 <b>Ежедневный дайджест</b>\n\nНовых событий за ночь: {len(pending)}\nЗапускаю обработку..."
+
+    text = (
+        f"📊 <b>Ежедневный дайджест</b>\n\n"
+        f"Релевантных событий за ночь: {total}\n"
+        f"Запускаю обработку (до 5 за раз, остальное — завтра)..."
+    )
     for mod_id in moderator_ids:
         try:
             await bot.send_message(mod_id, text, parse_mode="HTML")
         except Exception:
             pass
+
+    # Process a small batch; scheduler will catch the rest tomorrow
     await process_unprocessed_events(bot)
 
 

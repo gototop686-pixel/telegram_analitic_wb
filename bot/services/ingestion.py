@@ -57,7 +57,6 @@ async def _parse_feed(url: str):
 
 async def ingest_rss(source: dict) -> int:
     url = source["identifier"]
-    is_gov = _is_government_source(url)
     feed = await _parse_feed(url)
     saved = 0
     for entry in feed.entries[:20]:
@@ -65,8 +64,8 @@ async def ingest_rss(source: dict) -> int:
         title = entry.get("title", "")
         link = entry.get("link", "")
         text = f"{title}\n{body}"
-        # Government sources: skip articles with no marketplace keywords at all
-        if is_gov and not await _ingest_keyword_passes(text):
+        # ALL RSS sources: filter by keywords at ingestion time to keep DB clean
+        if not await _ingest_keyword_passes(text):
             continue
         content_hash = _hash(text)
         event_id = await queries.insert_raw_event(

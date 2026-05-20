@@ -42,7 +42,7 @@ def _keyword_passes(text: str, core: list[str], context: list[str], strict: bool
 
 
 async def process_unprocessed_events(bot: Bot, processing_tier: str = "all") -> int:
-    max_events = int(await queries.get_setting("max_events_per_run", "10"))
+    max_events = int(await queries.get_setting("max_events_per_run", "5"))
     min_confidence = float(await queries.get_setting("min_confidence", "0.45"))
     relevant_labels_str = await queries.get_setting("relevant_labels", "")
     _default_labels = {
