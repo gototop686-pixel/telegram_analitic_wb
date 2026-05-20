@@ -9,9 +9,15 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
 )
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from bot.db import queries
 from bot.services.publisher import publish_draft
+
+
+class PipelineKwAdd(StatesGroup):
+    waiting = State()
 
 
 async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
@@ -24,7 +30,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
                 [KeyboardButton(text="⚙️ Управление"), KeyboardButton(text="🤖 Обработать")],
                 [KeyboardButton(text="📝 Черновики"), KeyboardButton(text="📄 Анализ оферты")],
                 [KeyboardButton(text="🔗 Анализ ссылки"), KeyboardButton(text="🧠 Стратегии")],
-                [KeyboardButton(text="🔍 Поиск")],
+                [KeyboardButton(text="🔬 Пайплайн"), KeyboardButton(text="🔍 Поиск")],
             ],
             resize_keyboard=True,
             persistent=True,
@@ -474,6 +480,220 @@ async def handle_process_choice(callback: CallbackQuery) -> None:
 async def kb_menu(message: Message) -> None:
     from bot.handlers.admin_menu import cmd_menu
     await cmd_menu(message)
+
+
+async def _pipeline_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
+    from bot.services.llm import DEEPSEEK_API_KEY, GEMINI_API_KEY
+
+    def _icon(key): return "✅" if key else "❌"
+
+    if DEEPSEEK_API_KEY:
+        classify_model = "DeepSeek-V3"
+        post_model = "DeepSeek-V3"
+        cost_note = "~$0.001/пост"
+    elif GEMINI_API_KEY:
+        classify_model = "Gemini Flash"
+        post_model = "Gemini Flash"
+        cost_note = "бесплатно (лимит 1500/день)"
+    else:
+        classify_model = "Claude Haiku"
+        post_model = "Claude Sonnet"
+        cost_note = "платно $$"
+
+    max_events = await queries.get_setting("max_events_per_run", "5")
+    min_conf = await queries.get_setting("min_confidence", "0.45")
+
+    core_raw = await queries.get_setting("filter_core_keywords", "")
+    context_raw = await queries.get_setting("filter_context_keywords", "")
+    from bot.handlers.admin_menu import _kw_list
+    core_words = _kw_list(core_raw)
+    context_words = _kw_list(context_raw)
+
+    text = (
+        f"🔬 <b>Пайплайн анализа новостей</b>\n\n"
+        f"<b>🤖 Активные модели:</b>\n"
+        f"├ Классификация: <b>{classify_model}</b>\n"
+        f"├ Кластеризация: <b>{classify_model}</b>\n"
+        f"├ Генерация поста: <b>{post_model}</b> ({cost_note})\n"
+        f"└ Анализ оферты: <b>Claude Sonnet</b> (лучшее качество)\n\n"
+        f"<b>🔑 API ключи:</b>\n"
+        f"├ {_icon(DEEPSEEK_API_KEY)} DEEPSEEK_API_KEY\n"
+        f"├ {_icon(GEMINI_API_KEY)} GEMINI_API_KEY\n"
+        f"└ ✅ ANTHROPIC_API_KEY\n\n"
+        f"<b>📊 Параметры обработки:</b>\n"
+        f"├ Событий за запуск: <b>{max_events}</b>\n"
+        f"├ Мин. уверенность: <b>{min_conf}</b>\n"
+        f"└ Сбор новостей: каждые <b>2 часа</b>\n\n"
+        f"<b>🔍 Ключевые слова:</b>\n"
+        f"├ CORE: <b>{len(core_words)} слов</b> — 1 совпадение = проходит\n"
+        f"└ CONTEXT: <b>{len(context_words)} слов</b> — нужно 2+\n\n"
+        f"<b>Маршрут публикации:</b>\n"
+        f"🇷🇺 RU → @GTTnews\n"
+        f"🇦🇲 HY → @gttnewsam\n"
+        f"🌍 both → оба канала\n"
+        f"❓ unclear → черновики (ручная проверка)"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=f"🔑 CORE ({len(core_words)})", callback_data="pipe:kw:core"),
+            InlineKeyboardButton(text=f"🔑 CONTEXT ({len(context_words)})", callback_data="pipe:kw:context"),
+        ],
+        [
+            InlineKeyboardButton(text="📈 Порог 0.55 (строже)", callback_data="pipe_conf:0.55"),
+            InlineKeyboardButton(text="📉 Порог 0.35 (мягче)", callback_data="pipe_conf:0.35"),
+        ],
+        [
+            InlineKeyboardButton(text="📦 Пакет 3", callback_data="pipe_max:3"),
+            InlineKeyboardButton(text="📦 Пакет 5", callback_data="pipe_max:5"),
+            InlineKeyboardButton(text="📦 Пакет 10", callback_data="pipe_max:10"),
+        ],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="pipe:refresh")],
+    ])
+    return text, kb
+
+
+@router.message(F.text == "🔬 Пайплайн")
+async def kb_pipeline(message: Message) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        return
+    text, kb = await _pipeline_text_and_kb()
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "pipe:refresh")
+async def cb_pipe_refresh(call: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа")
+        return
+    text, kb = await _pipeline_text_and_kb()
+    await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await call.answer("🔄 Обновлено")
+
+
+@router.callback_query(F.data.startswith("pipe:kw:"))
+async def cb_pipe_kw_view(call: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа")
+        return
+    kw_type = call.data.split(":")[2]  # core | context
+    setting_key = f"filter_{kw_type}_keywords"
+    raw = await queries.get_setting(setting_key, "")
+    from bot.handlers.admin_menu import _kw_list
+    words = _kw_list(raw)
+    label = "CORE" if kw_type == "core" else "CONTEXT"
+
+    buttons = []
+    for i, w in enumerate(words):
+        buttons.append([InlineKeyboardButton(
+            text=f"❌ {w}",
+            callback_data=f"pipe:kw:del:{kw_type}:{i}",
+        )])
+    buttons.append([InlineKeyboardButton(text=f"➕ Добавить слово", callback_data=f"pipe:kw:add:{kw_type}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад к пайплайну", callback_data="pipe:refresh")])
+
+    hint = "1 совпадение = новость проходит фильтр" if kw_type == "core" else "нужно 2+ совпадения (если нет CORE)"
+    await call.message.edit_text(
+        f"<b>🔑 {label} ключевые слова ({len(words)})</b>\n"
+        f"<i>{hint}</i>\n\n"
+        + ("\n".join(f"• <code>{w}</code>" for w in words) if words else "⚠️ Список пуст — используются слова по умолчанию")
+        + "\n\nНажми ❌ рядом со словом чтобы удалить его.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("pipe:kw:del:"))
+async def cb_pipe_kw_del(call: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    parts = call.data.split(":")  # pipe:kw:del:core:0
+    kw_type, idx_str = parts[3], parts[4]
+    setting_key = f"filter_{kw_type}_keywords"
+    raw = await queries.get_setting(setting_key, "")
+    from bot.handlers.admin_menu import _kw_list
+    words = _kw_list(raw)
+    idx = int(idx_str)
+    if 0 <= idx < len(words):
+        removed = words.pop(idx)
+        await queries.set_setting(setting_key, ",".join(words))
+        import bot.services.ingestion as ing
+        ing._cached_core_kw = None
+        await call.answer(f"✅ Удалено: «{removed}»", show_alert=True)
+    # Refresh keyword list
+    call.data = f"pipe:kw:{kw_type}"
+    await cb_pipe_kw_view(call)
+
+
+@router.callback_query(F.data.startswith("pipe:kw:add:"))
+async def cb_pipe_kw_add_start(call: CallbackQuery, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    kw_type = call.data.split(":")[3]
+    label = "CORE" if kw_type == "core" else "CONTEXT"
+    await state.set_state(PipelineKwAdd.waiting)
+    await state.update_data(kw_type=kw_type)
+    await call.message.edit_text(
+        f"<b>➕ Добавить {label} ключевое слово</b>\n\n"
+        f"Введи слово или фразу (строчными буквами).\n"
+        f"Несколько сразу — через запятую: <code>wildberries, wb, вайлдберриз</code>\n\n"
+        f"Отправь /cancel для отмены.",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.message(PipelineKwAdd.waiting)
+async def cb_pipe_kw_add_save(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
+    if message.text and message.text.strip() == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.")
+        return
+
+    data = await state.get_data()
+    kw_type = data.get("kw_type", "core")
+    setting_key = f"filter_{kw_type}_keywords"
+    raw = await queries.get_setting(setting_key, "")
+    from bot.handlers.admin_menu import _kw_list
+    words = _kw_list(raw)
+
+    new_words = [w.strip().lower() for w in (message.text or "").split(",") if w.strip()]
+    added = []
+    for w in new_words:
+        if w and w not in words:
+            words.append(w)
+            added.append(w)
+
+    await queries.set_setting(setting_key, ",".join(words))
+    import bot.services.ingestion as ing
+    ing._cached_core_kw = None
+    await state.clear()
+
+    label = "CORE" if kw_type == "core" else "CONTEXT"
+    if added:
+        await message.answer(
+            f"✅ Добавлено в <b>{label}</b>: {', '.join(f'<code>{w}</code>' for w in added)}\n"
+            f"Всего слов: <b>{len(words)}</b>",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer("⚠️ Слова уже есть в списке или ввод пустой.")
+
+    # Show updated pipeline panel
+    text, kb = await _pipeline_text_and_kb()
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(F.text == "📄 Анализ оферты")
