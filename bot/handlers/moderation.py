@@ -509,29 +509,38 @@ async def _pipeline_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
     core_words = _kw_list(core_raw)
     context_words = _kw_list(context_raw)
 
+    # Load publish channels from DB
+    channels = await queries.get_publish_channels_full()
+    ru_channels = [c for c in channels if c["locale"] == "ru"]
+    hy_channels = [c for c in channels if c["locale"] == "hy"]
+
+    def _fmt_ch(ch_list):
+        if not ch_list:
+            return "не задан"
+        return ", ".join(c.get("label") or str(c["channel_id"]) for c in ch_list)
+
     text = (
-        f"🔬 <b>Пайплайн анализа новостей</b>\n\n"
+        f"🎛 <b>Фильтры и модели</b>\n\n"
         f"<b>🤖 Активные модели:</b>\n"
         f"├ Классификация: <b>{classify_model}</b>\n"
-        f"├ Кластеризация: <b>{classify_model}</b>\n"
         f"├ Генерация поста: <b>{post_model}</b> ({cost_note})\n"
-        f"└ Анализ оферты: <b>Claude Sonnet</b> (лучшее качество)\n\n"
+        f"└ Анализ оферты: <b>Claude Sonnet</b>\n\n"
         f"<b>🔑 API ключи:</b>\n"
         f"├ {_icon(DEEPSEEK_API_KEY)} DEEPSEEK_API_KEY\n"
         f"├ {_icon(GEMINI_API_KEY)} GEMINI_API_KEY\n"
         f"└ ✅ ANTHROPIC_API_KEY\n\n"
         f"<b>📊 Параметры обработки:</b>\n"
         f"├ Событий за запуск: <b>{max_events}</b>\n"
-        f"├ Мин. уверенность: <b>{min_conf}</b>\n"
+        f"├ Мин. уверенность: <b>{min_conf}</b> (0=всё, 1=только 100%)\n"
         f"└ Сбор новостей: каждые <b>2 часа</b>\n\n"
-        f"<b>🔍 Ключевые слова:</b>\n"
-        f"├ CORE: <b>{len(core_words)} слов</b> — 1 совпадение = проходит\n"
-        f"└ CONTEXT: <b>{len(context_words)} слов</b> — нужно 2+\n\n"
-        f"<b>Маршрут публикации:</b>\n"
-        f"🇷🇺 RU → @GTTnews\n"
-        f"🇦🇲 HY → @gttnewsam\n"
-        f"🌍 both → оба канала\n"
-        f"❓ unclear → черновики (ручная проверка)"
+        f"<b>🔍 Ключевые слова фильтрации:</b>\n"
+        f"├ CORE ({len(core_words)}): 1 совпадение = проходит\n"
+        f"└ CONTEXT ({len(context_words)}): нужно 2+ совпадения\n\n"
+        f"<b>📢 Маршруты публикации:</b>\n"
+        f"🇷🇺 RU → {_fmt_ch(ru_channels)}\n"
+        f"🇦🇲 HY → {_fmt_ch(hy_channels)}\n"
+        f"🌍 both → оба\n"
+        f"❓ unclear → черновики"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -547,6 +556,10 @@ async def _pipeline_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton(text="📦 Пакет 3", callback_data="pipe_max:3"),
             InlineKeyboardButton(text="📦 Пакет 5", callback_data="pipe_max:5"),
             InlineKeyboardButton(text="📦 Пакет 10", callback_data="pipe_max:10"),
+        ],
+        [
+            InlineKeyboardButton(text=f"📢 Каналы RU ({len(ru_channels)})", callback_data="pipe:routes:ru"),
+            InlineKeyboardButton(text=f"📢 Каналы HY ({len(hy_channels)})", callback_data="pipe:routes:hy"),
         ],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="pipe:refresh")],
     ])
@@ -649,6 +662,141 @@ async def cb_pipe_kw_add_start(call: CallbackQuery, state: FSMContext) -> None:
         parse_mode="HTML",
     )
     await call.answer()
+
+
+# ── Маршруты публикации ────────────────────────────────────────────────────
+
+class PipelineRouteAdd(StatesGroup):
+    waiting_channel_id = State()   # data: locale
+
+
+@router.callback_query(F.data.startswith("pipe:routes:"))
+async def cb_pipe_routes_view(call: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    locale = call.data.split(":")[2]  # ru | hy
+    channels = await queries.get_publish_channels_full()
+    locale_channels = [c for c in channels if c["locale"] == locale]
+    flag = "🇷🇺" if locale == "ru" else "🇦🇲"
+    label = "RU" if locale == "ru" else "HY"
+
+    buttons = []
+    for ch in locale_channels:
+        name = ch.get("label") or str(ch["channel_id"])
+        buttons.append([InlineKeyboardButton(
+            text=f"❌ {name}",
+            callback_data=f"pipe:routes:del:{ch['channel_id']}",
+        )])
+    buttons.append([InlineKeyboardButton(
+        text=f"➕ Добавить {flag} канал",
+        callback_data=f"pipe:routes:add:{locale}",
+    )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="pipe:refresh")])
+
+    hint = (
+        "Как узнать channel_id:\n"
+        "Перешли любое сообщение из канала боту @userinfobot — он покажет ID.\n"
+        "Для публичных каналов можно вписать @username."
+    )
+    await call.message.edit_text(
+        f"<b>📢 Каналы публикации {flag} {label} ({len(locale_channels)})</b>\n\n"
+        + ("\n".join(f"• {ch.get('label') or ch['channel_id']}" for ch in locale_channels)
+           if locale_channels else "⚠️ Каналов нет — новости пойдут в черновики")
+        + f"\n\n<i>{hint}</i>\n\nНажми ❌ чтобы отключить канал.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("pipe:routes:del:"))
+async def cb_pipe_routes_del(call: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    channel_id = int(call.data.split(":")[3])
+    await queries.remove_publish_channel(channel_id)
+    await call.answer("✅ Канал отключён", show_alert=True)
+    # Refresh — определяем locale из списка каналов
+    channels = await queries.get_publish_channels_full()
+    # Показываем оба маршрута через обновление пайплайна
+    text, kb = await _pipeline_text_and_kb()
+    await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("pipe:routes:add:"))
+async def cb_pipe_routes_add_start(call: CallbackQuery, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    locale = call.data.split(":")[3]
+    flag = "🇷🇺" if locale == "ru" else "🇦🇲"
+    await state.set_state(PipelineRouteAdd.waiting_channel_id)
+    await state.update_data(locale=locale)
+    await call.message.edit_text(
+        f"<b>➕ Добавить {flag} канал публикации</b>\n\n"
+        f"Введи данные канала в формате:\n"
+        f"<code>@username Название</code>\n"
+        f"или\n"
+        f"<code>-1001234567890 Название</code>\n\n"
+        f"Примеры:\n"
+        f"<code>@GTTnews GoToTop RU</code>\n"
+        f"<code>-1001987654321 Мой канал</code>\n\n"
+        f"Отправь /cancel для отмены.",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.message(PipelineRouteAdd.waiting_channel_id)
+async def cb_pipe_routes_add_save(message: Message, state: FSMContext) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        await state.clear()
+        return
+    if message.text and message.text.strip() == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.")
+        return
+
+    data = await state.get_data()
+    locale = data.get("locale", "ru")
+    parts = (message.text or "").strip().split(None, 1)
+    if not parts:
+        await message.answer("⚠️ Пустой ввод. Попробуй снова или /cancel")
+        return
+
+    raw_id = parts[0]
+    label = parts[1] if len(parts) > 1 else raw_id
+
+    # Convert @username or numeric id
+    try:
+        if raw_id.lstrip("-").isdigit():
+            channel_id = int(raw_id)
+        else:
+            # Store as string label, use hash as placeholder id
+            # Bot will resolve on first publish
+            channel_id = abs(hash(raw_id)) % (10**9) * -1
+            label = f"{raw_id} {label}".strip() if label != raw_id else raw_id
+    except Exception:
+        await message.answer("⚠️ Неверный формат. Введи @username или числовой ID.")
+        return
+
+    await queries.add_publish_channel(locale, channel_id, label)
+    await state.clear()
+
+    flag = "🇷🇺" if locale == "ru" else "🇦🇲"
+    await message.answer(
+        f"✅ Канал добавлен {flag}: <b>{label}</b>\n"
+        f"ID: <code>{channel_id}</code>",
+        parse_mode="HTML",
+    )
+    text, kb = await _pipeline_text_and_kb()
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(PipelineKwAdd.waiting)
