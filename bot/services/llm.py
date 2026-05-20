@@ -134,10 +134,14 @@ async def classify_and_summarize(text: str) -> dict:
         text=text[:3000],
     ).replace(GOTOTOP_CONTEXT, context, 1)
 
-    if GEMINI_API_KEY:
+    # Priority: DeepSeek → Gemini → Claude Haiku
+    if DEEPSEEK_API_KEY:
+        raw = await _deepseek(prompt, max_tokens=1000)
+        await _log_deepseek("classify")
+    elif GEMINI_API_KEY:
         raw = await _gemini(prompt, max_tokens=1000)
+        await _log_gemini("classify")
     else:
-        # Fallback to Claude Haiku
         client = get_client()
         response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -238,7 +242,10 @@ async def cluster_events(events: list[dict]) -> list[list[int]]:
     prompt = CLUSTER_PROMPT.format(titles=titles)
 
     try:
-        if GEMINI_API_KEY:
+        # Priority: DeepSeek → Gemini → Claude Haiku
+        if DEEPSEEK_API_KEY:
+            raw = await _deepseek(prompt, max_tokens=500)
+        elif GEMINI_API_KEY:
             raw = await _gemini(prompt, max_tokens=500)
         else:
             client = get_client()

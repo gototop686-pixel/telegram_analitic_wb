@@ -952,6 +952,113 @@ async def cmd_test_deepseek(message: Message) -> None:
         )
 
 
+@router.message(Command("pipeline"))
+async def cmd_pipeline(message: Message) -> None:
+    """Show analysis pipeline: which model does what + current thresholds."""
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        return
+
+    from bot.services.llm import DEEPSEEK_API_KEY, GEMINI_API_KEY, DEEPSEEK_MODEL, GEMINI_MODEL
+
+    def model_status(name: str, key: str) -> str:
+        return f"✅ <b>{name}</b>" if key else f"❌ {name} (ключ не задан)"
+
+    # Determine active model per task
+    if DEEPSEEK_API_KEY:
+        classify_model = f"✅ DeepSeek-V3 (активен)"
+        post_model = f"✅ DeepSeek-V3 (активен)"
+    elif GEMINI_API_KEY:
+        classify_model = f"🟡 Gemini Flash (DeepSeek не задан)"
+        post_model = f"🟡 Gemini Flash (DeepSeek не задан)"
+    else:
+        classify_model = "🔴 Claude Haiku (платный, оба ключа не заданы)"
+        post_model = "🔴 Claude Sonnet (платный, оба ключа не заданы)"
+
+    # Load current settings
+    max_events = await queries.get_setting("max_events_per_run", "5")
+    min_conf = await queries.get_setting("min_confidence", "0.45")
+    ingest_kw = await queries.get_setting("filter_core_keywords", "(по умолчанию)")
+    context_kw = await queries.get_setting("filter_context_keywords", "(по умолчанию)")
+
+    text = (
+        f"⚙️ <b>Пайплайн анализа новостей</b>\n\n"
+        f"<b>🤖 Модели:</b>\n"
+        f"├ Классификация: {classify_model}\n"
+        f"├ Кластеризация: {classify_model}\n"
+        f"├ Генерация поста: {post_model}\n"
+        f"└ Анализ оферты: ✅ Claude Sonnet (всегда)\n\n"
+        f"<b>🔑 API ключи:</b>\n"
+        f"├ {model_status('DEEPSEEK_API_KEY', DEEPSEEK_API_KEY)}\n"
+        f"├ {model_status('GEMINI_API_KEY', GEMINI_API_KEY)}\n"
+        f"└ ANTHROPIC_API_KEY: всегда задан\n\n"
+        f"<b>📊 Параметры обработки:</b>\n"
+        f"├ Событий за запуск: <code>{max_events}</code>\n"
+        f"├ Мин. уверенность: <code>{min_conf}</code> (0.0–1.0)\n"
+        f"├ Сбор новостей: каждые 2 часа\n"
+        f"└ Дневной дайджест: 09:00 МСК\n\n"
+        f"<b>🔍 Ключевые слова фильтрации:</b>\n"
+        f"└ Основные: <code>{ingest_kw[:80]}</code>\n\n"
+        f"<b>Этапы обработки новости:</b>\n"
+        f"1️⃣ Сбор RSS/Google News (каждые 2ч)\n"
+        f"2️⃣ Keyword-фильтр при сохранении\n"
+        f"3️⃣ Keyword-фильтр при обработке\n"
+        f"4️⃣ Кластеризация похожих новостей\n"
+        f"5️⃣ Классификация + резюме (DeepSeek)\n"
+        f"6️⃣ Генерация поста (DeepSeek)\n"
+        f"7️⃣ Автопубликация по рынку (RU/HY/both)"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📈 Поднять порог (0.55)", callback_data="pipe_conf:0.55"),
+            InlineKeyboardButton(text="📉 Снизить порог (0.35)", callback_data="pipe_conf:0.35"),
+        ],
+        [
+            InlineKeyboardButton(text="📦 Пакет 3 события", callback_data="pipe_max:3"),
+            InlineKeyboardButton(text="📦 Пакет 10 событий", callback_data="pipe_max:10"),
+        ],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="pipe_refresh")],
+    ])
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("pipe_conf:"))
+async def cb_pipe_conf(call: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа")
+        return
+    val = call.data.split(":")[1]
+    await queries.set_setting("min_confidence", val)
+    await call.answer(f"✅ Порог уверенности → {val}")
+    await call.message.edit_reply_markup(reply_markup=None)
+    await call.message.answer(f"✅ <code>min_confidence</code> = <b>{val}</b>\n\nНовости с уверенностью ниже {val} будут пропускаться.", parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("pipe_max:"))
+async def cb_pipe_max(call: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа")
+        return
+    val = call.data.split(":")[1]
+    await queries.set_setting("max_events_per_run", val)
+    await call.answer(f"✅ Размер пакета → {val}")
+    await call.message.answer(f"✅ <code>max_events_per_run</code> = <b>{val}</b>", parse_mode="HTML")
+
+
+@router.callback_query(F.data == "pipe_refresh")
+async def cb_pipe_refresh(call: CallbackQuery) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if call.from_user.id not in admin_ids:
+        await call.answer("Нет доступа")
+        return
+    await call.answer("🔄 Обновляю...")
+    await call.message.delete()
+    await cmd_pipeline(call.message)
+
+
 @router.message(Command("dbcheck"))
 async def cmd_dbcheck(message: Message) -> None:
     """Check DB schema — verify all migrations ran."""
