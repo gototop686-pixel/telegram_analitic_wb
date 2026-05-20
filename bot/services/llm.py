@@ -9,6 +9,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.0-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = "deepseek-chat"  # DeepSeek-V3
+DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+
 
 def get_client() -> anthropic.AsyncAnthropic:
     global _client
@@ -42,6 +46,36 @@ async def _gemini(prompt: str, max_tokens: int = 1000) -> str:
             continue
         raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:200]}")
     raise RuntimeError("Gemini error 429: quota exceeded after 3 retries")
+
+
+async def _deepseek(prompt: str, max_tokens: int = 1500) -> str:
+    """Call DeepSeek-V3 (cheap). Auto-retry on 429."""
+    import asyncio
+    if not DEEPSEEK_API_KEY:
+        raise ValueError("DEEPSEEK_API_KEY not set")
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.3,
+    }
+    for attempt in range(3):
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.post(
+                DEEPSEEK_URL,
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+                json=payload,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+        if resp.status_code == 429:
+            wait = 10 * (attempt + 1)
+            print(f"[deepseek] Rate limit (429), waiting {wait}s before retry {attempt+1}/3")
+            await asyncio.sleep(wait)
+            continue
+        raise RuntimeError(f"DeepSeek error {resp.status_code}: {resp.text[:200]}")
+    raise RuntimeError("DeepSeek error 429: quota exceeded after 3 retries")
 
 
 GOTOTOP_CONTEXT = """Ты аналитик компании GoToTop — консалтинговой компании для продавцов на Wildberries.
@@ -141,6 +175,17 @@ async def _log_gemini(operation: str) -> None:
     try:
         from bot.db import queries
         await queries.log_llm_cost(operation, 0, 0, "gemini-2.0-flash", 0.0)
+    except Exception:
+        pass
+
+
+async def _log_deepseek(operation: str) -> None:
+    """Log DeepSeek call with approximate cost (V3: $0.27/$1.10 per 1M tokens)."""
+    try:
+        from bot.db import queries
+        # Approximate: ~800 input + ~600 output tokens per post generation
+        cost = (800 * 0.27 + 600 * 1.10) / 1_000_000
+        await queries.log_llm_cost(operation, 800, 600, "deepseek-chat", cost)
     except Exception:
         pass
 
@@ -311,7 +356,6 @@ async def generate_post(
     confidence_band: str,
     strategies: list[dict] | None = None,
 ) -> dict:
-    client = get_client()
     if strategies:
         lines = ["СТРАТЕГИИ КОМПАНИИ GOTOTOP (учитывай при написании поста):"]
         for s in strategies:
@@ -326,13 +370,21 @@ async def generate_post(
         confidence_band=confidence_band,
         strategies_block=strategies_block,
     )
-    response = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    await _log_cost("generate_post", response, "claude-sonnet-4-6")
-    raw = response.content[0].text.strip()
+
+    # DeepSeek-V3 if key set (much cheaper), else Claude Sonnet fallback
+    if DEEPSEEK_API_KEY:
+        raw = await _deepseek(prompt, max_tokens=1500)
+        await _log_deepseek("generate_post")
+    else:
+        client = get_client()
+        response = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        await _log_cost("generate_post", response, "claude-sonnet-4-6")
+        raw = response.content[0].text.strip()
+
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):

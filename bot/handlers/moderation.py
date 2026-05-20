@@ -919,6 +919,39 @@ async def cmd_test_gemini(message: Message) -> None:
         )
 
 
+@router.message(Command("test_deepseek"))
+async def cmd_test_deepseek(message: Message) -> None:
+    admin_ids = await queries.get_admin_ids()
+    if message.from_user.id not in admin_ids:
+        return
+    await message.answer("🔍 Тестирую DeepSeek API...")
+    try:
+        from bot.services.llm import _deepseek, DEEPSEEK_API_KEY, DEEPSEEK_MODEL
+        if not DEEPSEEK_API_KEY:
+            await message.answer(
+                "❌ <code>DEEPSEEK_API_KEY</code> не установлен в Railway Variables.\n\n"
+                "Получи ключ на <b>platform.deepseek.com</b> → API Keys",
+                parse_mode="HTML",
+            )
+            return
+        result = await _deepseek("Скажи 'OK' одним словом.", max_tokens=10)
+        await message.answer(
+            f"✅ <b>DeepSeek работает!</b>\n\n"
+            f"Модель: <code>{DEEPSEEK_MODEL}</code>\n"
+            f"Ответ: <code>{result[:100]}</code>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await message.answer(
+            f"❌ <b>Ошибка DeepSeek:</b>\n<code>{e}</code>\n\n"
+            f"Проверь:\n"
+            f"• Правильно ли скопирован ключ в Railway\n"
+            f"• Ключ должен начинаться с <code>sk-</code>\n"
+            f"• Есть ли баланс на platform.deepseek.com",
+            parse_mode="HTML",
+        )
+
+
 @router.message(Command("dbcheck"))
 async def cmd_dbcheck(message: Message) -> None:
     """Check DB schema — verify all migrations ran."""
